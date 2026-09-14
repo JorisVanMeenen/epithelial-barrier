@@ -1,0 +1,366 @@
+---
+title: "08_Supplements-FITC-Dextran"
+author: "Joris Van Meenen"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+## Load modules
+
+```{r}
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(ggprism)
+library(ggforce)
+library(stringr)
+library(ggpubr)
+library(rstatix)
+library(emmeans)
+library(tidyr)
+library(scales)
+library(ggstatsplot)
+library(sandwich)
+```
+
+## Load data
+
+```{r}
+long <- data.frame()
+
+dir <- "D://Documents//Work//Data//Cornea-on-chip//Epithelial barrier//08_Supplements//Tecan//FITC-Dextran"
+
+blankList <- c("JVM_FITC-Dextran (Modified)_20251119_123809.xlsx", "JVM_FITC-Dextran (Modified)_20251119_152507.xlsx")
+wtfList <- c("JVM_FITC-Dextran (Modified)_20251119_155957.xlsx")
+
+xlsxList <- list.files(path = dir, pattern = "*.xlsx", full.names = TRUE, ignore.case = TRUE)
+
+for (xlsx in xlsxList) {
+  raw <- read_xlsx(xlsx, col_names = FALSE)
+  skip <- which(raw[[1]] == "<>")[1] - 1
+  df <- read_xlsx(
+    file.path(xlsx),
+    skip = skip
+  )
+  df <- df[1:8,2:13]
+  fluorescence <- as.vector(t(df))
+  fluorescence <- fluorescence[!is.na(fluorescence) > 0]
+  fluorescence<- as.numeric(fluorescence)
+  
+  gain <- read_xlsx(
+    file.path(xlsx),
+    range = "E31",
+    col_names = FALSE
+  )[[1]]
+  gain <- rep(gain, length(fluorescence))
+  
+  plate <- basename(xlsx)
+  plate <- rep(plate, length(fluorescence))
+  
+  if (basename(xlsx) %in% blankList) {
+    condition <- c(
+      rep(c("Control"), 9),
+      rep(c("HCE-T", "Calcium"), times = 4),
+      rep(c("Blank"), 4),
+      rep(c("GSK", "SP"), times = 4),
+      rep(c("Blank"), 4),
+      rep(c("SP+IGF1", "IGF1"), times = 4),
+      rep(c("HCE-T", "Calcium"), times = 4),
+      rep(c("GSK", "SP"), times = 4),
+      rep(c("SP+IGF1", "IGF1"), times = 4),
+      rep(c("HCE-T", "Calcium", "GSK", "SP", "SP+IGF1", "IGF1"), each = 2)
+    )
+    
+    replicate <- c(
+      1,5,2,6,3,7,4,8,9,
+      rep(1:4, each = 2),
+      1:4,
+      rep(1:4, each = 2),
+      5:8,
+      rep(1:4, each = 2),
+      rep(5:8, each = 2, times = 3),
+      rep(9:10, times = 6)
+    )
+  } else if (basename(xlsx) %in% wtfList) {
+    condition <- c(
+      rep(c("HCE-T", "Calcium"), times = 4),
+      rep(c("Blank"), 4),
+      rep(c("GSK", "SP"), times = 4),
+      rep(c("Blank"), 4),
+      rep(c("SP+IGF1", "IGF1"), times = 4),
+      "Control",
+      rep(c("HCE-T", "Calcium"), times = 4),
+      rep(c("GSK", "SP"), times = 4),
+      "SP+IGF1",
+      "IGF1",
+      rep("Control", 2),
+      rep(c("HCE-T", "Calcium"), times = 2),
+      rep("Control", 4),
+      rep(c("GSK", "SP"), times = 2),
+      rep("Control", 2),
+      "SP+IGF1",
+      "IGF1",
+      rep(c("SP+IGF1", "IGF1"), times = 4)
+    )
+    
+    replicate <- c(
+      rep(1:4, each = 2),
+      1:4,
+      rep(1:4, each = 2),
+      5:8,
+      rep(1:4, each = 2),
+      5,
+      rep(5:8, each = 2, times = 2),
+      rep(9, 2),
+      1:2,
+      rep(9:10, each = 2),
+      6:7,
+      3:4,
+      rep(9:10, each = 2),
+      8:9,
+      rep(10, 2),
+      rep(5:8, each = 2)
+    )
+  } else {
+    condition <- c(
+      rep(c("HCE-T", "Calcium"), times = 4),
+      rep(c("Blank"), 4),
+      rep(c("GSK", "SP"), times = 4),
+      rep(c("Blank"), 4),
+      rep(c("SP+IGF1", "IGF1"), times = 4),
+      rep(c("HCE-T", "Calcium"), times = 4),
+      rep(c("GSK", "SP"), times = 4),
+      rep(c("SP+IGF1", "IGF1"), times = 4),
+      rep(c("HCE-T", "Calcium", "GSK", "SP", "SP+IGF1", "IGF1"), each = 2),
+      rep(c("Control"), 9)
+    )
+    
+    replicate <- c(
+      rep(1:4, each = 2),
+      1:4,
+      rep(1:4, each = 2),
+      5:8,
+      rep(1:4, each = 2),
+      rep(5:8, each = 2, times = 3),
+      rep(9:10, times = 6),
+      1,5,2,6,3,7,4,8,9
+    )
+  }
+  
+  df <- data.frame(
+    "Plate" = plate,
+    "Condition" = condition,
+    "Replicate" = replicate,
+    "Fluorescence (RFU)" = fluorescence, 
+    "Gain" = gain,
+    check.names = FALSE
+  )
+
+  long <- dplyr::bind_rows(long, df)
+}
+
+timepoint <- c(rep(c(seq(0, 40, by = 5), 0, 5, 40), each = length(fluorescence)))
+  
+PBS <- c(rep("Before PBS", 9*length(fluorescence)), rep("After PBS", 3*length(fluorescence)))
+
+
+long["PBS"] <- PBS
+long["Time (min)"] <- timepoint
+
+## Set to factor to enable statistics bracket placement
+long$Condition <- factor(long$Condition, levels = c("HCE-T", "Calcium", "GSK", "SP", "SP+IGF1", "IGF1", "Control", "Blank"))
+
+long
+```
+
+# Raw data
+
+## Visualisation
+
+The optimal gain was automatically determined for each timepoint, leading to a seemingly decrease of Blank values after PBS was added.
+
+```{r}
+dat <- long
+
+ggplot(data = dat, aes(x = `Time (min)`, y = `Fluorescence (RFU)`, color = Condition, group = interaction(Replicate, Condition))) +
+  scale_y_continuous(trans = "log2") +
+  geom_line(aes(linewidth = (Condition == "Blank" | Condition == "Control"))) +
+  scale_linewidth_manual(
+    values = c("TRUE" = 1.5, "FALSE" = 0.5),
+    guide = "none"
+  ) +
+  facet_wrap(~ reorder(PBS, desc(PBS)))
+```
+
+# Normalised data
+
+## Normalisation
+
+Normalise to blanks to be able to compare different plates with different gains
+
+```{r}
+
+## Normalise by blank samples
+long <- long %>%
+  group_by(PBS, `Time (min)`) %>%
+  mutate(
+    Blank = mean(`Fluorescence (RFU)`[Condition == "Blank"], na.rm = TRUE),
+    `Blank Normalised Fluorescence (AU)` = `Fluorescence (RFU)` / Blank
+  ) %>%
+  ungroup()
+
+## Normalise by timepoint = 0
+long <- long %>%
+  group_by(PBS, Condition, Replicate) %>%
+  mutate(
+    Time0 = `Blank Normalised Fluorescence (AU)`[[1]],
+    `Normalised Fluorescence (AU)` = `Blank Normalised Fluorescence (AU)` / Time0
+  ) %>%
+  ungroup()
+
+  
+```
+
+## Visualise Normalised data
+
+-   [ ] Adjust line thickness in legend
+
+```{r, fig.height=4, fig.width=8}
+dat <- long
+
+ggplot(data = dat, aes(x = `Time (min)`, y = `Blank Normalised Fluorescence (AU)`, color = Condition, group = interaction(Replicate, Condition))) +
+  scale_y_continuous(trans = "log2") +
+  geom_line(aes(linewidth = (Condition == "Blank" | Condition == "Control"))) +
+  scale_linewidth_manual(
+    values = c("TRUE" = 1.5, "FALSE" = 0.5),
+    guide = "none"
+  ) +
+  facet_wrap(~ reorder(PBS, desc(PBS))) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713)
+
+dat <- long
+
+ggplot(data = dat, aes(x = `Time (min)`, y = `Normalised Fluorescence (AU)`, color = Condition, group = interaction(Replicate, Condition))) +
+  scale_y_continuous(trans = "log2") +
+  geom_line(aes(linewidth = (Condition == "Blank" | Condition == "Control"))) +
+  scale_linewidth_manual(
+    values = c("TRUE" = 1.5, "FALSE" = 0.5),
+    guide = "none"
+  ) +
+  facet_wrap(~ reorder(PBS, desc(PBS))) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713)
+```
+
+# Calculate metrics
+
+```{r}
+
+metrics <- long[long$`Time (min)` >= 5 & long$Condition != "Blank",] %>%
+  group_by(Condition, Replicate) %>%
+  summarise(
+    `Slope (AU/min)` = coefficients(lm(`Blank Normalised Fluorescence (AU)` ~ `Time (min)`))[2]
+  ) %>%
+  ungroup()
+
+normalisedMetrics <- metrics %>%
+  mutate(
+    `Normalised slope (AU)` = `Slope (AU/min)` / mean(`Slope (AU/min)`[Condition == "Control"])
+  )
+```
+
+## Statistics
+
+```{r}
+dat <- normalisedMetrics[normalisedMetrics$Condition != "Control",]
+renamed_dat <- dat %>%
+  rename(Slope = `Normalised slope (AU)`)
+
+model <- lm(`Normalised slope (AU)` ~ Condition, data = dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`Normalised slope (AU)`",
+         facet.by = "Condition",
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+renamed_dat %>%
+  group_by(Condition) %>%
+  shapiro_test(Slope)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`Normalised slope (AU)` ~ Condition)
+dat_summary <- dat %>%
+  group_by(Condition) %>%
+  get_summary_stats(`Normalised slope (AU)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 2, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_normalised <- emmeans(model, ~ Condition, vcov. = vcovHC3)
+pairs(emm_normalised, adjust = "bonferroni")
+stat_normalised <- summary(pairs(emm_normalised, adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_normalised_pos <- stat_normalised %>%
+  add_xy_position(
+    x = "Condition",
+    data = dat,
+    formula = `Normalised slope (AU)` ~ Condition,
+  ) %>%
+  mutate(y.position = 0.15 + (row_number() * 0.05)) %>%
+  mutate(
+    xmin = match(group1, levels(droplevels(dat$Condition))),
+    xmax = match(group2, levels(droplevels(dat$Condition))),
+  )
+```
+
+## Visualisation
+
+```{r}
+dat <- normalisedMetrics[normalisedMetrics$Condition != "Control",]
+x <- dat$Condition
+y <- dat$`Normalised slope (AU)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 4, maxwidth = 0.5, scale = FALSE, alpha =
+    0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(0, 1), expand = c(0, 0), oob = oob_keep, guide = guide_prism_minor()) +
+  geom_hline(yintercept = 1, linetype="dashed") +
+  coord_cartesian(clip = "off") +
+  stat_pvalue_manual(
+    stat_normalised_pos,
+    label = "p.adj.signif",
+    tip.length = 0,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  scale_color_manual(
+    breaks = c("HCE-T", "Calcium", "GSK", "SP", "SP+IGF1", "IGF1", "Control", "Calibration resistor", "Measurement medium"),
+    values = c("HCE-T" = "#F8766D", "Calcium" = "#DB8E00", "GSK" = "#AEA200", "SP" = "#64B200", "SP+IGF1" = "#00BD5C", "IGF1" = "#00C1A7", "Control" = "#00BADE", "Blank" = "#00A6FF")) +
+  theme_prism(base_size = 28) +
+  theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"), axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+```

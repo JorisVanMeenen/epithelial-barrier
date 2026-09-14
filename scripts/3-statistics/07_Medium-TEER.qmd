@@ -1,0 +1,784 @@
+---
+title: "07_Medium"
+author: "Joris Van Meenen"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+## Load modules
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggprism)
+library(ggforce)
+library(tidyr)
+library(scales)
+library(rstatix)
+library(ggpubr)
+library(emmeans)
+library(sandwich)
+library(zoo)
+
+set.seed(42)
+```
+
+## Data to long
+
+```{r}
+## Initialise variables
+long <- data.frame()
+startDate <- as.Date("20250824", format="%Y%m%d")
+dir = "D://Documents//Work//Data//Cornea-on-chip//Epithelial barrier//07_Medium//EVOM3//"
+
+## Load and concatenate csv files
+csvList = list.files(path = dir, pattern = "*.CSV", full.names = TRUE)
+
+for (csv in csvList) {
+  ## Extract resistance values
+  df <- read.csv(
+    file.path(csv),
+    skip = 7,
+    header = TRUE,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+  df <- df[1:8,2:13]
+  resistance <- as.vector(t(df))
+  resistance <- resistance[resistance > 0]
+  df <- data.frame("Resistance (Ω)" = resistance, check.names = FALSE)
+  ## Filter out calibration measurements
+  df <- df %>% 
+    mutate(
+      Condition = case_when(
+        (row_number() == 1 & `Resistance (Ω)` >= 995 & `Resistance (Ω)` <= 1005) ~ "Calibration resistor",
+        (`Resistance (Ω)` >= 30 & `Resistance (Ω)` <= 50) ~ "Measurement medium",
+        TRUE ~ "TBD"
+      ),
+      ## Each medium measurement designates a separate set of measurements
+      Measurement = cumsum(Condition == "Measurement medium")
+    )
+  
+  ## Cleanup pre-measurements that test for changes due to media change
+  if (max(df$Measurement) > 1) {
+    df$Measurement <- ifelse(
+      df$Measurement == 1, 
+      2, 
+      ifelse(
+        df$Measurement == 2, 
+        1, 
+        df$Measurement
+      )
+    )
+  }
+  
+  ## Cleanup measurements and add conditions
+  if (min(df$Measurement) < 1) {
+    df[df$Measurement == 0, "Measurement"] <- 1
+  }
+  df[df$Condition == "TBD", "Condition"] <- rep(c("PBS", "HCE-T", "CnT-PR", "CnT-2D", "CnT-3D"), times = sum(df$Condition == "TBD")/5)
+  
+  ## Add date and day variables
+  name <- basename(csv)
+  date <- as.Date(strsplit(name, "_")[[1]][2], format="%Y%m%d")
+  dateDiff <- as.double(date - startDate)
+  df["Date"] <- rep(date, nrow(df))
+  df["Days after seeding"] <- rep(dateDiff, nrow(df))
+  
+  ## Add plate, row, column and replicate variables
+  if (substr(csv, nchar(csv) - 4, nchar(csv)-4) == "1") {
+    
+    df[df$Measurement == 1, "Plate"] <- c(NA, NA, rep(c(1, 1, 2, 2, 3), each = 10))
+    df[df$Measurement == 1, "Row"] <- c(NA, NA, rep(c(1, 2, 3, 4, 1, 2, 3, 4, 2, 3), each = 5))
+    df[df$Measurement == 1, "Column"] <- c(NA, NA, rep(c(1, 2, 3, 4, 5), times = 10))
+    df[df$Measurement == 1, "Replicate"] <- c(1, 1, rep(c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), each = 5))
+    if (max(df$Measurement) > 1) {
+      df[df$Measurement == 2, "Plate"] <- c(NA, rep(c(1), times = 20))
+      df[df$Measurement == 2, "Row"] <- c(NA, rep(c(1, 2, 3, 4), each = 5))
+      df[df$Measurement == 2, "Column"] <- c(NA, rep(c(1, 2, 3, 4, 5), times = 4))
+      df[df$Measurement == 2, "Replicate"] <- c(1, rep(c(1, 2, 3, 4), each = 5))
+    }
+    
+    PBS <- rep("Before PBS", length(resistance))
+    
+  } else {
+    
+    df[df$Measurement == 1, "Plate"] <- c(NA, rep(c(1, 1, 2, 2, 3), each = 10))
+    df[df$Measurement == 1, "Row"] <- c(NA, rep(c(1, 2, 3, 4, 1, 2, 3, 4, 2, 3), each = 5))
+    df[df$Measurement == 1, "Column"] <- c(NA, rep(c(1, 2, 3, 4, 5), times = 10))
+    df[df$Measurement == 1, "Replicate"] <- c(1, rep(c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), each = 5))
+    if (max(df$Measurement) > 1) {
+      df[df$Measurement == 2, "Plate"] <- c(NA, rep(c(1), times = 20))
+      df[df$Measurement == 2, "Row"] <- c(NA, rep(c(1, 2, 3, 4), each = 5))
+      df[df$Measurement == 2, "Column"] <- c(NA, rep(c(1, 2, 3, 4, 5), times = 4))
+      df[df$Measurement == 2, "Replicate"] <- c(1, rep(c(1, 2, 3, 4), each = 5))
+    }
+    
+    PBS <- rep("After incubation", length(resistance))
+  }
+  
+  if (name == "Plate_20250825_2.CSV") {
+    PBS <- rep("After PBS", length(resistance))
+  }
+  df["PBS"] <- PBS
+  
+  ## Merge all csv files
+  long <- dplyr::bind_rows(long, df)
+}
+
+## Set to factor to enable statistics bracket placement
+long$Condition <- factor(long$Condition, levels = c("HCE-T", "CnT-PR", "CnT-2D", "CnT-3D", "PBS", "Calibration resistor", "Measurement medium"))
+
+long <- long %>%
+  mutate(Group = case_when(
+    Condition %in% c("Hydrogel control", "Control", "Calibration resistor", "Measurement medium", "Artificial tears") ~ "No cells",
+    TRUE ~ "Cells"
+  ))
+
+long
+```
+
+## Platemap
+
+```{r, fig.height=4, fig.width=12}
+
+dat <- long[long$Measurement == 1 & long$PBS == "Before PBS" & !is.na(long$Plate),]
+dat$Plate <- paste0("Plate ", as.character(dat$Plate))
+x <- dat$Column
+y <- dat$Row
+
+ggplot(data = dat, aes(x = factor(Column), y = reorder(Row, desc(Row)), color = factor(Condition, levels = c("PBS", "HCE-T", "CnT-PR", "CnT-2D", "CnT-3D")))) + 
+  geom_point(shape = 16, size = 14) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  facet_wrap(~ Plate) +
+  theme_prism() +
+  theme(
+    axis.line = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  theme(aspect.ratio = 0.713)
+```
+
+# Resistance
+
+## Visualise data before PBS
+
+```{r}
+dat <- long[long$Measurement == 1 & long$PBS == "Before PBS",]
+
+control_conditions <- c("Calibration resistor", "Measurement medium")
+interesting_conditions <- setdiff(unique(dat$Condition), control_conditions)
+dat_background <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_facet = Condition) %>%
+  crossing(Condition_display = interesting_conditions) %>%
+  filter(Condition_facet != Condition_display)
+dat_interesting <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_display = Condition)
+dat_control <- dat %>%
+  filter(Condition %in% control_conditions) %>%
+  crossing(Condition_display = interesting_conditions)
+
+ggplot(data = dat, aes(x = `Days after seeding`, y = `Resistance (Ω)`, color = Condition)) + 
+  geom_line(data = dat_control,
+            aes(group = interaction(Condition, Replicate))
+            ) +
+  geom_point(data = dat_control,
+            aes(group = interaction(Condition, Replicate))
+            ) +
+  geom_line(data = dat_background,
+            aes(group = interaction(Condition_facet, Replicate)),
+            color = "grey") +
+  geom_point(data = dat_background,
+            aes(group = interaction(Condition_facet, Replicate)),
+            color = "grey") +
+  geom_line(data = dat_interesting,
+            aes(group = interaction(Condition, Replicate))
+            ) +
+  geom_point(data = dat_interesting,
+            aes(group = interaction(Condition, Replicate))
+            ) +
+  geom_vline(xintercept = 8, linetype="dashed") +
+  annotate("text", x=8, y=200, label="Start", hjust = 1.2) +
+  geom_vline(xintercept = 15, linetype="dashed") +
+  annotate("text", x=15, y=200, label="Viability", hjust = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_y_continuous(limits = c(0, 1000), expand = c(0, 0), oob = scales::oob_keep, guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  scale_x_continuous(limits = c(0, 20), expand = c(0, 0), guide = guide_prism_minor(), minor_breaks = seq(0, 20, 1)) +
+  facet_wrap(~ factor(Condition_display, levels = c("HCE-T", "CnT-PR", "CnT-2D", "CnT-3D", "PBS")), scales = "free") +
+  scale_color_manual(
+    breaks = c("HCE-T", "CnT-PR", "CnT-2D", "CnT-3D", "PBS", "Calibration resistor", "Measurement medium"),
+    values = c("HCE-T" = "#F8766D", "CnT-PR" = "#DB8E00", "CnT-2D" = "#AEA200", "CnT-3D" = "#64B200", "PBS" = "#00BD5C", "Calibration resistor" = "#00C1A7", "Measurement medium" = "#00BADE")) +
+  theme_prism(base_size = 22, base_line_size = 1.2) +
+  theme(panel.spacing.x = unit(1.5, "lines"), legend.key.spacing.y = unit(0.5, "lines"))
+```
+
+## Visualise data after PBS
+
+```{r}
+dat <- long[long$Measurement == 1 & long$PBS == "After incubation",]
+
+control_conditions <- c("Calibration resistor", "Measurement medium")
+interesting_conditions <- setdiff(unique(dat$Condition), control_conditions)
+dat_background <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_facet = Condition) %>%
+  crossing(Condition_display = interesting_conditions) %>%
+  filter(Condition_facet != Condition_display)
+dat_interesting <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_display = Condition)
+dat_control <- dat %>%
+  filter(Condition %in% control_conditions) %>%
+  crossing(Condition_display = interesting_conditions)
+
+ggplot(data = dat, aes(x = `Days after seeding`, y = `Resistance (Ω)`, color = Condition)) + 
+  geom_line(data = dat_control,
+            aes(group = interaction(Condition, Replicate))
+            ) +
+  geom_point(data = dat_control,
+            aes(group = interaction(Condition, Replicate))
+            ) +
+  geom_line(data = dat_background,
+            aes(group = interaction(Condition_facet, Replicate)),
+            color = "grey") +
+  geom_point(data = dat_background,
+            aes(group = interaction(Condition_facet, Replicate)),
+            color = "grey") +
+  geom_line(data = dat_interesting,
+            aes(group = interaction(Condition, Replicate))
+            ) +
+  geom_point(data = dat_interesting,
+            aes(group = interaction(Condition, Replicate))
+            ) +
+  geom_vline(xintercept = 8, linetype="dashed") +
+  annotate("text", x=8, y=200, label="Start", hjust = 1.2) +
+  geom_vline(xintercept = 15, linetype="dashed") +
+  annotate("text", x=15, y=200, label="Viability", hjust = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_y_continuous(limits = c(0, 1000), expand = c(0, 0), oob = scales::oob_keep, guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  scale_x_continuous(limits = c(0, 20), expand = c(0, 0), guide = guide_prism_minor(), minor_breaks = seq(0, 20, 1)) +
+  facet_wrap(~ factor(Condition_display, levels = c("HCE-T", "CnT-PR", "CnT-2D", "CnT-3D", "PBS")), scales = "free") +
+  scale_color_manual(
+    breaks = c("HCE-T", "CnT-PR", "CnT-2D", "CnT-3D", "PBS", "Calibration resistor", "Measurement medium"),
+    values = c("HCE-T" = "#F8766D", "CnT-PR" = "#DB8E00", "CnT-2D" = "#AEA200", "CnT-3D" = "#64B200", "PBS" = "#00BD5C", "Calibration resistor" = "#00C1A7", "Measurement medium" = "#00BADE")) +
+  theme_prism(base_size = 22, base_line_size = 1.2) +
+  theme(panel.spacing.x = unit(1.5, "lines"), legend.key.spacing.y = unit(0.5, "lines"))
+```
+
+## Visualisation: Medium change
+
+```{r}
+
+dat <- long %>%
+  filter(!is.na(Plate)) %>%
+  filter(PBS == "Before PBS") %>%
+  filter(Condition != "Control") %>%
+  group_by(`Days after seeding`) %>%
+  filter(n_distinct(Measurement) == 2)
+
+lapply(split(dat, dat$`Days after seeding`), function(z) {
+  ggplot(data = z, aes(x = reorder(Measurement, desc(Measurement)), y = `Resistance (Ω)`, color = Condition, group = interaction(Condition, Measurement))) + 
+    xlab("Measurement") +
+    scale_x_discrete(label = c("Before", "After")) +
+    geom_violin(width = 0.5, scale = "width", position = position_dodge(width = 0.8), alpha = 0.2, colour = "black", linewidth = 1) +
+    geom_sina(size = 4, maxwidth = 0.5, position = position_dodge(width = 0.8), scale = FALSE, alpha = 0.4, stroke = 0) +
+    theme_prism(base_size = 28) +
+    theme(axis.title.x = element_blank())
+})
+```
+
+## Metrics: CV
+
+```{r}
+dat <- long[long$Measurement == 1 & long$PBS == "Before PBS" & !is.na(long$Plate),]
+cv <- dat %>%
+  filter(!is.na(Plate)) %>%
+  group_by(Condition, Replicate) %>%
+  arrange(`Days after seeding`) %>%
+  mutate(CV = rollapply(
+    data = `Resistance (Ω)`,
+    width = 3,
+    FUN = function(x) {
+      sd(x)/mean(x) * 100
+    },
+    align = "right",
+    fill = NA
+  )) %>%
+  ungroup() %>% 
+  mutate(`CV <= 15%` = case_when(
+    CV <= 15 ~ TRUE,
+    CV > 15 ~ FALSE,
+    TRUE ~ NA
+  ))
+```
+
+## Visualisation: CV
+
+```{r}
+dat <- cv
+x <- factor(dat$Replicate)
+y <- reorder(dat$`Days after seeding`, desc(dat$`Days after seeding`))
+
+ggplot(data = dat, aes(x = x, y = y, color = `CV <= 15%`)) + 
+  geom_point(shape = 16, size = 8) +
+  xlab("Replicate") +
+  ylab("Days after seeding") +
+  facet_wrap(~ Condition) +
+  theme_prism(base_size = 22, base_line_size = 1.2) +
+  theme(axis.line = element_blank(), axis.ticks = element_blank(), panel.spacing.x = unit(1.5, "lines"), legend.title = element_text(), legend.title.position = "top")
+```
+
+# Metrics: nTEER
+
+## Calculate (n)TEER
+
+Incubation in PBS at every timepoint, empty control estimated from controls in other experiments
+
+```{r}
+#control_min <- min(experiment1_control$`Resistance (Ω)`, experiment3_control$`Resistance (Ω)`, experiment4_control$`Resistance (Ω)`)
+control_min <- 222
+#control_mean <- mean(c(experiment1_control$`Resistance (Ω)`, experiment3_control$`Resistance (Ω)`, experiment4_control$`Resistance (Ω)`))
+control_mean <- 266.909385113269
+#control_max <- max(experiment1_control$`Resistance (Ω)`, experiment3_control$`Resistance (Ω)`, experiment4_control$`Resistance (Ω)`)
+control_max <- 290
+
+nTEER <- long %>%
+  filter(!is.na(Plate)) %>%
+  group_by(Date, `Days after seeding`, Condition, Replicate) %>%
+  reframe(
+    `Max TEER (Ω*cm²)` = (`Resistance (Ω)`[PBS == "Before PBS"] - control_min) * 0.3359273609,
+    `TEER (Ω*cm²)` = (`Resistance (Ω)`[PBS == "Before PBS"] - control_mean) * 0.3359273609,
+    `Min TEER (Ω*cm²)` = (`Resistance (Ω)`[PBS == "Before PBS"] - control_max) * 0.3359273609,
+    `nTEER (Ω*cm²)` = (`Resistance (Ω)`[PBS == "Before PBS"] - `Resistance (Ω)`[PBS == "After incubation"]) * 0.3359273609,
+  )
+
+```
+
+## Visualise TEER
+
+```{r}
+dat <- nTEER
+
+control_conditions <- c("Calibration resistor", "Measurement medium")
+interesting_conditions <- setdiff(unique(dat$Condition), control_conditions)
+dat_background <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_facet = Condition) %>%
+  crossing(Condition_display = interesting_conditions) %>%
+  filter(Condition_facet != Condition_display)
+dat_interesting <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_display = Condition)
+dat_control <- dat %>%
+  filter(Condition %in% control_conditions) %>%
+  crossing(Condition_display = interesting_conditions)
+
+ggplot(data = dat, aes(x = `Days after seeding`, y = `Max TEER (Ω*cm²)`, color = Condition)) + 
+  geom_line(data = dat_control,
+            aes(group = interaction(Condition, Replicate))
+            ) +
+  geom_point(data = dat_control,
+            aes(group = interaction(Condition, Replicate))
+            ) +
+  geom_line(data = dat_background,
+            aes(group = interaction(Condition_facet, Replicate)),
+            color = "grey") +
+  geom_point(data = dat_background,
+            aes(group = interaction(Condition_facet, Replicate)),
+            color = "grey") +
+  geom_line(data = dat_interesting,
+            aes(group = interaction(Condition, Replicate))
+            ) +
+  geom_point(data = dat_interesting,
+            aes(group = interaction(Condition, Replicate))
+            ) +
+  geom_vline(xintercept = 8, linetype="dashed") +
+  annotate("text", x=8, y=-25, label="Start", hjust = 1.2) +
+  geom_vline(xintercept = 15, linetype="dashed") +
+  annotate("text", x=15, y=-25, label="Viability", hjust = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_y_continuous(limits = c(-50, 150), expand = c(0, 0), oob = scales::oob_keep, guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  scale_x_continuous(limits = c(0, 20), expand = c(0, 0), guide = guide_prism_minor(), minor_breaks = seq(0, 20, 1)) +
+  facet_wrap(~ factor(Condition_display, levels = c("HCE-T", "CnT-PR", "CnT-2D", "CnT-3D", "PBS", "Calibration resistor", "Measurement medium")), scales = "free") +
+  scale_color_manual(
+    breaks = c("HCE-T", "CnT-PR", "CnT-2D", "CnT-3D", "PBS", "Calibration resistor", "Measurement medium"),
+    values = c("HCE-T" = "#F8766D", "CnT-PR" = "#DB8E00", "CnT-2D" = "#AEA200", "CnT-3D" = "#64B200", "PBS" = "#00BD5C", "Calibration resistor" = "#00C1A7", "Measurement medium" = "#00BADE")) +
+  theme_prism(base_size = 22, base_line_size = 1.2) +
+  theme(panel.spacing.x = unit(1.5, "lines"), legend.key.spacing.y = unit(0.5, "lines"))
+```
+
+## Visualise nTEER
+
+```{r}
+dat <- nTEER
+
+control_conditions <- c("Calibration resistor", "Measurement medium")
+interesting_conditions <- setdiff(unique(dat$Condition), control_conditions)
+dat_background <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_facet = Condition) %>%
+  crossing(Condition_display = interesting_conditions) %>%
+  filter(Condition_facet != Condition_display)
+dat_interesting <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_display = Condition)
+dat_control <- dat %>%
+  filter(Condition %in% control_conditions) %>%
+  crossing(Condition_display = interesting_conditions)
+
+ggplot(data = dat, aes(x = `Days after seeding`, y = `nTEER (Ω*cm²)`, color = Condition)) + 
+  geom_line(data = dat_control,
+            aes(group = interaction(Condition, Replicate))
+            ) +
+  geom_point(data = dat_control,
+            aes(group = interaction(Condition, Replicate))
+            ) +
+  geom_line(data = dat_background,
+            aes(group = interaction(Condition_facet, Replicate)),
+            color = "grey") +
+  geom_point(data = dat_background,
+            aes(group = interaction(Condition_facet, Replicate)),
+            color = "grey") +
+  geom_line(data = dat_interesting,
+            aes(group = interaction(Condition, Replicate))
+            ) +
+  geom_point(data = dat_interesting,
+            aes(group = interaction(Condition, Replicate))
+            ) +
+  geom_vline(xintercept = 8, linetype="dashed") +
+  annotate("text", x=8, y=-25, label="Start", hjust = 1.2) +
+    geom_vline(xintercept = 15, linetype="dashed") +
+  annotate("text", x=15, y=-25, label="Viability", hjust = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_y_continuous(limits = c(-50, 150), expand = c(0, 0), oob = scales::oob_keep, guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  scale_x_continuous(limits = c(0, 20), expand = c(0, 0), guide = guide_prism_minor(), minor_breaks = seq(0, 20, 1)) +
+  facet_wrap(~ factor(Condition_display, levels = c("HCE-T", "CnT-PR", "CnT-2D", "CnT-3D", "PBS", "Calibration resistor", "Measurement medium")), scales = "free") +
+  scale_color_manual(
+    breaks = c("HCE-T", "CnT-PR", "CnT-2D", "CnT-3D", "PBS", "Calibration resistor", "Measurement medium"),
+    values = c("HCE-T" = "#F8766D", "CnT-PR" = "#DB8E00", "CnT-2D" = "#AEA200", "CnT-3D" = "#64B200", "PBS" = "#00BD5C", "Calibration resistor" = "#00C1A7", "Measurement medium" = "#00BADE")) +
+  theme_prism(base_size = 22, base_line_size = 1.2) +
+  theme(panel.spacing.x = unit(1.5, "lines"), legend.key.spacing.y = unit(0.5, "lines"))
+
+```
+
+# Before vs after
+
+## Statistics: by condition
+
+```{r}
+dat <- droplevels(nTEER[nTEER$`Days after seeding` == 8 | nTEER$`Days after seeding` == 15,])
+dat$`Days after seeding` <- factor(dat$`Days after seeding`, levels = c(8, 15), labels = c("Before", "After"))
+renamed_dat <- dat %>%
+  rename(nTEER = `nTEER (Ω*cm²)`) %>%
+  rename(Time = `Days after seeding`)
+
+model <- lm(nTEER ~ Time * Condition, data = renamed_dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`nTEER (Ω*cm²)`",
+         facet.by = c("Days after seeding", "Condition"),
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+shapiro_individual <- renamed_dat %>%
+  group_by(Time, Condition) %>%
+  shapiro_test(nTEER)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`nTEER (Ω*cm²)` ~ `Days after seeding` * Condition)
+dat_summary <- dat %>%
+  group_by(`Days after seeding`, Condition) %>%
+  get_summary_stats(`nTEER (Ω*cm²)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 3, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_Resistance <- emmeans(model, ~ Time * Condition, vcov. = vcovHC3)
+pairs(emm_Resistance, by = "Condition", adjust = "bonferroni")
+stat_Resistance <- summary(pairs(emm_Resistance, by = "Condition", adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_Resistance_pos <- stat_Resistance %>%
+  add_xy_position(
+    x = "Time",
+    data = renamed_dat,
+    formula = nTEER ~ Time,
+  ) %>%
+  mutate(
+    xmin = match(group1, levels(renamed_dat$Time)),
+    xmax = match(group2, levels(renamed_dat$Time)),
+  ) %>% 
+  group_by(Condition) %>%
+  mutate(
+    y.position = max(renamed_dat$nTEER[renamed_dat$Condition == unique(Condition)]) + (row_number() * max(renamed_dat$nTEER[renamed_dat$Condition == unique(Condition)])/5)
+    ) %>%
+  ungroup()
+```
+
+## Visualisation: by condition
+
+```{r}
+dat <- droplevels(nTEER[nTEER$`Days after seeding` == 8 | nTEER$`Days after seeding` == 15,])
+dat$`Days after seeding` <- factor(dat$`Days after seeding`, levels = c(8, 15), labels = c("Before", "After"))
+y <- dat$`nTEER (Ω*cm²)`
+
+ggplot(data = dat, aes(x = `Days after seeding`, y = y, color = Condition)) + 
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 4, maxwidth = 0.5, scale = FALSE, alpha =
+    0.4, stroke = 0) +
+  coord_cartesian(clip = "off") +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(-50, 150), expand = c(0, 0), oob = oob_keep, guide = guide_prism_minor()) +
+  stat_pvalue_manual(
+    stat_Resistance_pos,
+    label = "p.adj.signif",
+    tip.length = 0.025,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  geom_hline(yintercept = 0, linetype="dashed") +
+  scale_color_manual(
+    breaks = c("HCE-T", "CnT-PR", "CnT-2D", "CnT-3D", "PBS", "Reservoir", "Measurement medium"),
+    values = c("HCE-T" = "#F8766D", "CnT-PR" = "#DB8E00", "CnT-2D" = "#AEA200", "CnT-3D" = "#64B200", "PBS" = "#00BD5C", "Reservoir" = "#00C1A7", "Measurement medium" = "#00BADE")) +
+    facet_wrap(~ factor(Condition, levels = c("HCE-T", "CnT-PR", "CnT-2D", "CnT-3D", "PBS")), scales = "free") +
+    theme_prism(base_size = 28) +
+    theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"))
+
+
+```
+
+## Statistics: by time
+
+```{r}
+dat <- droplevels(nTEER[nTEER$`Days after seeding` == 8 | nTEER$`Days after seeding` == 15,])
+dat$`Days after seeding` <- factor(dat$`Days after seeding`, levels = c(8, 15), labels = c("Before", "After"))
+renamed_dat <- dat %>%
+  rename(nTEER = `nTEER (Ω*cm²)`) %>%
+  rename(Time = `Days after seeding`)
+
+model <- lm(nTEER ~ Time * Condition, data = renamed_dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`nTEER (Ω*cm²)`",
+         facet.by = c("Days after seeding", "Condition"),
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+shapiro_individual <- renamed_dat %>%
+  group_by(Time, Condition) %>%
+  shapiro_test(nTEER)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`nTEER (Ω*cm²)` ~ `Days after seeding` * Condition)
+dat_summary <- dat %>%
+  group_by(`Days after seeding`, Condition) %>%
+  get_summary_stats(`nTEER (Ω*cm²)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 3, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_Resistance <- emmeans(model, ~ Time * Condition, vcov. = vcovHC3)
+pairs(emm_Resistance, by = "Time", adjust = "bonferroni")
+stat_Resistance <- summary(pairs(emm_Resistance, by = "Time", adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_Resistance_pos <- stat_Resistance %>%
+  add_xy_position(
+    x = "Condition",
+    data = renamed_dat,
+    formula = nTEER ~ Condition,
+  ) %>%
+  mutate(
+    xmin = match(group1, levels(renamed_dat$Condition)),
+    xmax = match(group2, levels(renamed_dat$Condition)),
+  ) %>% 
+  group_by(Time) %>%
+  mutate(
+    y.position = max(renamed_dat$nTEER[renamed_dat$Time == unique(Time)]) + (row_number() * 10)
+    ) %>%
+  ungroup() %>%
+  rename(`Days after seeding` = Time)
+```
+
+## Visualisation: by time
+
+```{r}
+dat <- droplevels(nTEER[nTEER$`Days after seeding` == 8 | nTEER$`Days after seeding` == 15,])
+dat$`Days after seeding` <- factor(dat$`Days after seeding`, levels = c(8, 15), labels = c("Before", "After"))
+y <- dat$`nTEER (Ω*cm²)`
+
+ggplot(data = dat, aes(x = Condition, y = y, color = Condition)) + 
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 4, maxwidth = 0.5, scale = FALSE, alpha =
+    0.4, stroke = 0) +
+  coord_cartesian(clip = "off") +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(-50, 200), expand = c(0, 0), oob = oob_keep, guide = guide_prism_minor()) +
+  stat_pvalue_manual(
+    stat_Resistance_pos,
+    label = "p.adj.signif",
+    tip.length = 0,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  geom_hline(yintercept = 0, linetype="dashed") +
+  scale_color_manual(
+    breaks = c("HCE-T", "CnT-PR", "CnT-2D", "CnT-3D", "PBS", "Reservoir", "Measurement medium"),
+    values = c("HCE-T" = "#F8766D", "CnT-PR" = "#DB8E00", "CnT-2D" = "#AEA200", "CnT-3D" = "#64B200", "PBS" = "#00BD5C", "Reservoir" = "#00C1A7", "Measurement medium" = "#00BADE")) +
+    facet_wrap(~ factor(`Days after seeding`, levels = c("Before", "After")), scales = "free") +
+    theme_prism(base_size = 28) +
+    theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"))
+
+
+```
+
+# Meta
+
+## Measurement medium
+
+### Data
+
+```{r}
+experiment2_medium <- long[long$PBS == "Before PBS" & long$Condition == "Measurement medium",]
+
+```
+
+### Visualisation
+
+```{r}
+dat <- experiment2_medium
+x <- rep("Experiment 1", length(dat$`Resistance (Ω)`))
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+```
+
+## Controls
+
+Not included in experiment
+
+## HCE-T
+
+### Data
+
+Limiting non-HCE-T data points to 8 days after seeding to avoid any influence of the induced conditions
+
+
+```{r}
+experiment2_hcet_resistance <- long[long$Group == "Cells" & long$`Days after seeding` <= 8 & long$PBS == "Before PBS" | long$Condition == "HCE-T" & long$PBS == "Before PBS",]
+experiment2_hcet_nTEER <- nTEER[nTEER$Condition == "HCE-T",]
+```
+
+### Visualisation
+
+```{r}
+dat <- experiment2_hcet_resistance
+x <- rep("Experiment 1", length(dat$`Resistance (Ω)`))
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = x, y = y)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+
+dat <- experiment2_hcet_nTEER
+x <- rep("Experiment 1", length(dat$`TEER (Ω*cm²) min`))
+y <- dat$`TEER (Ω*cm²) min`
+
+ggplot(data = dat, aes(x = x, y = y)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+
+dat <- experiment2_hcet_nTEER
+x <- rep("Experiment 1", length(dat$`TEER (Ω*cm²)`))
+y <- dat$`TEER (Ω*cm²)`
+
+ggplot(data = dat, aes(x = x, y = y)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+
+dat <- experiment2_hcet_nTEER
+x <- rep("Experiment 1", length(dat$`TEER (Ω*cm²) max`))
+y <- dat$`TEER (Ω*cm²) max`
+
+ggplot(data = dat, aes(x = x, y = y)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+
+dat <- experiment2_hcet_nTEER
+x <- rep("Experiment 1", length(dat$`nTEER (Ω*cm²)`))
+y <- dat$`nTEER (Ω*cm²)`
+
+ggplot(data = dat, aes(x = x, y = y)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+
+```

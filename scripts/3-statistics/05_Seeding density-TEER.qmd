@@ -1,0 +1,1073 @@
+---
+title: "05_Seeding density-TEER"
+author: "Joris Van Meenen"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+## Load modules
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggprism)
+library(ggforce)
+library(tidyr)
+library(scales)
+library(rstatix)
+library(ggpubr)
+library(emmeans)
+library(sandwich)
+library(zoo)
+
+set.seed(42)
+```
+
+## Data to long
+
+-   Measurements were made in 2-3 day intervals
+
+-   Every measurement was accompanied by a measurement of the test resistor to test functionality of the device and of the measurement medium to test functionality of the electrodes
+
+-   Every measurement consisted of 4 measurements in 20 min intervals
+
+-   The last day, samples were incubated in PBS without calcium and magnesium to open up the barrier without removing or killing the cells
+
+-   The last day, an additional measurement was performed after EIS but before PBS to determine whether EIS has a detrimental effect on TEER
+
+```{r}
+## Initialise variables
+long <- data.frame()
+startDate <- as.Date("20250327", format="%Y%m%d") #Last day of seeding
+dir = "D://Documents//Work//Data//Cornea-on-chip//Epithelial barrier//05_Seeding density//EVOM3//"
+
+## Load and concatenate csv files
+csvList = list.files(path = dir, pattern = "*.CSV", full.names = TRUE)
+
+for (csv in csvList) {
+  ## Extract resistance values
+  df <- read.csv(
+    file.path(csv),
+    skip = 7,
+    header = TRUE,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+  df <- df[1:8,2:13]
+  resistance <- as.vector(t(df))
+  resistance <- resistance[resistance > 0]
+  df <- data.frame("Resistance (Ω)" = resistance, check.names = FALSE)
+  ## Filter out calibration measurements
+  df <- df %>% 
+    mutate(
+      Condition = case_when(
+        (row_number() == 1 & `Resistance (Ω)` >= 995 & `Resistance (Ω)` <= 1005) ~ "Calibration resistor",
+        `Resistance (Ω)` <= 100 ~ "Measurement medium",
+        TRUE ~ "TBD"
+      )
+    )
+  
+  ## Add conditions
+  df[df$Condition == "TBD", "Condition"] <- c(rep("Control", 10), rep(c("25%", "50%", "100%", "Serial", "Bulk"), times = 10))
+  
+  ## Add date and day variables
+  name <- basename(csv)
+  date <- as.Date(strsplit(name, "_")[[1]][2], format="%Y%m%d")
+  dateDiff <- as.double(date - startDate)
+  df["Date"] <- rep(date, nrow(df))
+  df["Days after seeding"] <- rep(dateDiff, nrow(df))
+  
+  ## Add plate, row, column and replicate variables
+  if (df[1, "Condition"] == "Calibration resistor"){
+    df["Plate"] <- c(NA, NA, rep(c(1, 2), each = 4), rep(3, 2), rep(c(1, 1, 2, 2, 3), each = 10))
+    df["Row"] <- c(NA, NA, 1:4, 1:4, 2:3, rep(c(1, 2, 3, 4, 1, 2, 3, 4, 2, 3), each = 5))
+    df["Column"] <- c(NA, NA, rep(6, 10), rep(c(1, 2, 3, 4, 5), times = 10))
+    df["Replicate"] <- c(1, 1, 1:10, rep(c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), each = 5))
+  } else {
+    df["Plate"] <- c(NA, rep(c(1, 2), each = 4), rep(3, 2), rep(c(1, 1, 2, 2, 3), each = 10))
+    df["Row"] <- c(NA, 1:4, 1:4, 2:3, rep(c(1, 2, 3, 4, 1, 2, 3, 4, 2, 3), each = 5))
+    df["Column"] <- c(NA, rep(6, 10), rep(c(1, 2, 3, 4, 5), times = 10))
+    df["Replicate"] <- c(1, 1:10, rep(c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), each = 5))
+  }
+  
+  index <- as.integer(substr(csv, nchar(csv) - 4, nchar(csv)-4))
+  df["Time (min)"] <- rep(c(20, 40, 60, 80, 140, 205, 225, 245, 265)[index], length(resistance))
+  if (index < 5) {
+    PBS <- rep("Before PBS", length(resistance))
+  } else {
+    PBS <- rep("After PBS", length(resistance))
+  }
+  df["PBS"] <- PBS
+  
+  ## Merge all csv files
+  long <- dplyr::bind_rows(long, df)
+}
+
+long
+
+## Set to factor to enable statistics bracket placement
+long$Condition <- factor(long$Condition, levels = c("25%", "50%", "100%", "Serial", "Bulk", "Control", "Calibration resistor", "Measurement medium"))
+
+```
+
+## Platemap
+
+```{r, fig.height=4, fig.width=12}
+
+dat <- long[!is.na(long$Plate),]
+dat$Plate <- paste0("Plate ", as.character(dat$Plate))
+x <- dat$Column
+y <- dat$Row
+
+ggplot(data = dat, aes(x = factor(Column), y = reorder(Row, desc(Row)), color = factor(Condition, levels = c("25%", "50%", "100%", "Serial", "Bulk", "Control")))) + 
+  geom_point(shape = 16, size = 14) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_color_manual(
+    breaks = c("25%", "50%", "100%", "Serial", "Bulk", "Control", "Calibration resistor", "Measurement medium"),
+    values = c("25%" = "#F8766D", "50%" = "#DB8E00", "100%" = "#AEA200", "Serial" = "#64B200", "Bulk" = "#00BD5C", "Control" = "#00C1A7", "Calibration resistor" = "#00BADE", "Measurement medium" = "#00A6FF")) +
+  facet_wrap(~ Plate) +
+  theme_prism() +
+  theme(
+    axis.line = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  theme(aspect.ratio = 0.713)
+
+```
+
+# Measurement time
+
+## Visualisation: Data faceted by days before PBS
+
+```{r}
+dat <- long[long$`Time (min)` <= 80 & long$PBS == "Before PBS",]
+dat$`Days after seeding` <- factor(dat$`Days after seeding`, levels = c(1,4,6,8,11,13,15))
+dat$`Days after seeding` <- factor(paste0("Day ", as.character(dat$`Days after seeding`)), levels = c("Day 1","Day 4","Day 6","Day 8","Day 11","Day 13","Day 15"))
+
+#factor(first(`Column`), levels = c(1:12))
+
+ggplot(data = dat, aes(x = `Time (min)`, y = `Resistance (Ω)`)) + 
+  geom_line(aes(color = Condition, 
+                group = interaction(Condition, Replicate))
+            ) +
+  geom_point(aes(color = Condition, 
+                group = interaction(Condition, Replicate)),
+             size = 2
+            ) +
+  geom_hline(yintercept = 1000, linetype="dashed") +
+  scale_color_manual(
+    breaks = c("25%", "50%", "100%", "Serial", "Bulk", "Control", "Calibration resistor", "Measurement medium"),
+    values = c("25%" = "#F8766D", "50%" = "#DB8E00", "100%" = "#AEA200", "Serial" = "#64B200", "Bulk" = "#00BD5C", "Control" = "#00C1A7", "Calibration resistor" = "#00BADE", "Measurement medium" = "#00A6FF")) +
+  facet_wrap(~ `Days after seeding`, scales = "free") +
+  theme_prism(base_size = 22, base_line_size = 1.2) +
+  theme(panel.spacing.x = unit(1.5, "lines"), legend.key.spacing.y = unit(0.5, "lines"))
+
+```
+
+## Metrics: Average-normalised resistance
+
+```{r}
+before <- long[long$`Time (min)` <= 80 & long$PBS == "Before PBS" & long$Condition != "Calibration resistor" & long$Condition != "Measurement medium",] %>%
+  group_by(`Days after seeding`, Condition, Replicate) %>%
+  mutate(
+    `Normalised resistance (AU)` = `Resistance (Ω)` / mean(`Resistance (Ω)`),
+  ) %>%
+  ungroup()
+
+after <- long[long$`Time (min)` >= 205 & long$PBS == "After PBS" & long$Condition != "Calibration resistor" & long$Condition != "Measurement medium",] %>%
+  group_by(`Days after seeding`, Condition, Replicate) %>%
+  mutate(
+    `Normalised resistance (AU)` = `Resistance (Ω)` / mean(`Resistance (Ω)`),
+  ) %>%
+  ungroup()
+```
+
+## Visualisation: Data collapsed across days
+
+```{r}
+dat <- long[long$`Time (min)` <= 80 & long$PBS == "Before PBS" & long$Condition != "Calibration resistor" & long$Condition != "Measurement medium",] %>%
+  group_by(`Days after seeding`, Condition, Replicate) %>%
+  mutate(
+    `Normalised resistance (AU)` = `Resistance (Ω)` / mean(`Resistance (Ω)`),
+  )
+
+control_conditions <- c("")
+interesting_conditions <- setdiff(unique(dat$Condition), control_conditions)
+dat_background <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_facet = Condition) %>%
+  crossing(Condition_display = interesting_conditions) %>%
+  filter(Condition_facet != Condition_display)
+dat_interesting <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_display = Condition)
+dat_control <- dat %>%
+  filter(Condition %in% control_conditions) %>%
+  crossing(Condition_display = interesting_conditions)
+dat_interesting <- rbind(dat_interesting, dat_control)
+
+ggplot(data = dat, aes(x = `Time (min)`, y = `Normalised resistance (AU)`, color = Condition)) + 
+  geom_line(data = dat_background, aes(group = interaction(`Days after seeding`, Condition_facet, Replicate)), color = "grey") +
+  geom_point(data = dat_background, aes(group = interaction(`Days after seeding`, Condition_facet, Replicate)), color = "grey", size = 2) +
+  geom_line(data = dat_interesting, aes(group = interaction(`Days after seeding`, Condition, Replicate))) +
+  geom_point(data = dat_interesting, aes(group = interaction(`Days after seeding`, Condition, Replicate)), size = 2) +
+  scale_y_continuous(limits = c(0.78, 1.200001), expand = c(0, 0)) +
+  geom_hline(yintercept = 1, linetype="dashed") +
+  scale_color_manual(
+    breaks = c("25%", "50%", "100%", "Serial", "Bulk", "Control", "Calibration resistor", "Measurement medium"),
+    values = c("25%" = "#F8766D", "50%" = "#DB8E00", "100%" = "#AEA200", "Serial" = "#64B200", "Bulk" = "#00BD5C", "Control" = "#00C1A7", "Calibration resistor" = "#00BADE", "Measurement medium" = "#00A6FF")) +
+  facet_wrap(~ factor(Condition_display, levels = c("25%", "50%", "100%", "Serial", "Bulk", "Control")), scales = "free") +
+  theme_prism(base_size = 22, base_line_size = 1.2) +
+  theme(panel.spacing.x = unit(1.5, "lines"), legend.key.spacing.y = unit(0.5, "lines"))
+```
+
+## Statistics Resistance: Effect of time on samples before PBS
+
+```{r}
+dat <- droplevels(long[long$`Time (min)` <= 80 & long$Condition != "Calibration resistor" & long$Condition != "Measurement medium" & !(long$Condition == "Control" & long$Replicate == 2),])
+dat$`Time (min)` <- factor(dat$`Time (min)`, levels = c(20, 40, 60, 80), labels = c("20 min", "40 min", "60 min", "80 min"))
+renamed_dat <- dat %>%
+  rename(Resistance = `Resistance (Ω)`) %>%
+  rename(Time = `Time (min)`)
+
+model <- lm(Resistance ~ Time * Condition, data = renamed_dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`Resistance (Ω)`",
+         facet.by = c("Time (min)", "Condition"),
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+shapiro_individual <- renamed_dat %>%
+  group_by(Time, Condition) %>%
+  shapiro_test(Resistance)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`Resistance (Ω)` ~ `Time (min)` * Condition)
+dat_summary <- dat %>%
+  group_by(`Time (min)`, Condition) %>%
+  get_summary_stats(`Resistance (Ω)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 3, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_Resistance <- emmeans(model, ~ Time * Condition, vcov. = vcovHC3)
+pairs(emm_Resistance, by = "Condition", adjust = "bonferroni")
+stat_Resistance <- summary(pairs(emm_Resistance, by = "Condition", adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_Resistance_pos <- stat_Resistance %>%
+  add_xy_position(
+    x = "Time",
+    data = renamed_dat,
+    formula = `Resistance` ~ Time,
+  ) %>%
+  mutate(
+    xmin = match(group1, levels(renamed_dat$Time)),
+    xmax = match(group2, levels(renamed_dat$Time)),
+  ) %>% 
+  group_by(Condition) %>%
+  mutate(
+    y.position = case_when(
+      Condition != "Control" ~ max(renamed_dat$Resistance[renamed_dat$Condition == unique(Condition)]) + (row_number() * max(renamed_dat$Resistance[renamed_dat$Condition == unique(Condition)])/5),
+    TRUE ~ 290 + (row_number() * 10)
+    )) %>%
+  ungroup()
+```
+
+## Visualisation Resistance: 20-80 min
+
+```{r}
+dat <- long[long$`Time (min)` <= 80 & long$Condition != "Calibration resistor" & long$Condition != "Measurement medium" & !(long$Condition == "Control" & long$Replicate == 2),]
+dat$`Time (min)` <- as.factor(dat$`Time (min)`)
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = `Time (min)`, y = y, color = Condition)) + 
+  xlab("Time (min)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 4, maxwidth = 0.5, scale = FALSE, alpha = 0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  scale_y_continuous(guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  scale_color_manual(
+    breaks = c("25%", "50%", "100%", "Serial", "Bulk", "Control", "Calibration resistor", "Measurement medium"),
+    values = c("25%" = "#F8766D", "50%" = "#DB8E00", "100%" = "#AEA200", "Serial" = "#64B200", "Bulk" = "#00BD5C", "Control" = "#00C1A7", "Calibration resistor" = "#00BADE", "Measurement medium" = "#00A6FF")) +
+  stat_pvalue_manual(
+    stat_Resistance_pos,
+    label = "p.adj.signif",
+    tip.length = 0.025,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  facet_wrap(~ factor(Condition, levels = c("25%", "50%", "100%", "Serial", "Bulk", "Control")), scales = "free") +
+  theme_prism(base_size = 28) +
+  theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"))
+
+```
+
+## Statistics Normalised: Effect of time on samples before PBS
+
+```{r}
+dat <- droplevels(before[!(before$Condition == "Control" & before$Replicate == 2),])
+dat$`Time (min)` <- factor(dat$`Time (min)`, levels = c(20, 40, 60, 80), labels = c("20 min", "40 min", "60 min", "80 min"))
+renamed_dat <- dat %>%
+  rename(Resistance = `Normalised resistance (AU)`) %>%
+  rename(Time = `Time (min)`)
+
+model <- lm(Resistance ~ Time * Condition, data = renamed_dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`Normalised resistance (AU)`",
+         facet.by = c("Time (min)", "Condition"),
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+shapiro_individual <- renamed_dat %>%
+  group_by(Time, Condition) %>%
+  shapiro_test(Resistance)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`Normalised resistance (AU)` ~ `Time (min)` * Condition)
+dat_summary <- dat %>%
+  group_by(`Time (min)`, Condition) %>%
+  get_summary_stats(`Normalised resistance (AU)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 3, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_Resistance <- emmeans(model, ~ Time * Condition, vcov. = vcovHC3)
+pairs(emm_Resistance, by = "Condition", adjust = "bonferroni")
+stat_Resistance <- summary(pairs(emm_Resistance, by = "Condition", adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_Resistance_pos <- stat_Resistance %>%
+  add_xy_position(
+    x = "Time",
+    data = renamed_dat,
+    formula = `Resistance` ~ Time,
+  ) %>%
+  mutate(
+    xmin = match(group1, levels(renamed_dat$Time)),
+    xmax = match(group2, levels(renamed_dat$Time)),
+  ) %>% 
+  group_by(Condition) %>%
+  mutate(
+    y.position = max(renamed_dat$Resistance[renamed_dat$Condition == unique(Condition)]) + (row_number() * max(renamed_dat$Resistance[renamed_dat$Condition == unique(Condition)])/10)
+    ) %>%
+  ungroup()
+```
+
+## Visualisation Normalised: 20-80 min
+
+```{r}
+dat <- before[!(before$Condition == "Control" & before$Replicate == 2),]
+dat$`Time (min)` <- as.factor(dat$`Time (min)`)
+y <- dat$`Normalised resistance (AU)`
+
+ggplot(data = dat, aes(x = `Time (min)`, y = y, color = Condition)) + 
+  xlab("Time (min)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 4, maxwidth = 0.5, scale = FALSE, alpha = 0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  scale_y_continuous(guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  scale_color_manual(
+    breaks = c("25%", "50%", "100%", "Serial", "Bulk", "Control", "Calibration resistor", "Measurement medium"),
+    values = c("25%" = "#F8766D", "50%" = "#DB8E00", "100%" = "#AEA200", "Serial" = "#64B200", "Bulk" = "#00BD5C", "Control" = "#00C1A7", "Calibration resistor" = "#00BADE", "Measurement medium" = "#00A6FF")) +
+  stat_pvalue_manual(
+    stat_Resistance_pos,
+    label = "p.adj.signif",
+    tip.length = 0.025,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  facet_wrap(~ factor(Condition, levels = c("25%", "50%", "100%", "Serial", "Bulk", "Control")), scales = "free") +
+  theme_prism(base_size = 28) +
+  theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"))
+
+```
+
+## Visualisation: 205-265 min
+
+```{r}
+dat <- long[long$`Time (min)` >= 205 & long$PBS == "After PBS" & long$Condition != "Calibration resistor" & long$Condition != "Measurement medium",] %>%
+  group_by(`Days after seeding`, Condition, Replicate) %>%
+  mutate(
+    `Normalised resistance (AU)` = `Resistance (Ω)` / mean(`Resistance (Ω)`),
+    `Time (min)` = `Time (min)` - 185
+  )
+
+control_conditions <- c("")
+interesting_conditions <- setdiff(unique(dat$Condition), control_conditions)
+dat_background <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_facet = Condition) %>%
+  crossing(Condition_display = interesting_conditions) %>%
+  filter(Condition_facet != Condition_display)
+dat_interesting <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_display = Condition)
+dat_control <- dat %>%
+  filter(Condition %in% control_conditions) %>%
+  crossing(Condition_display = interesting_conditions)
+dat_interesting <- rbind(dat_interesting, dat_control)
+
+ggplot(data = dat, aes(x = `Time (min)`, y = `Normalised resistance (AU)`, color = Condition)) + 
+  geom_line(data = dat_background, aes(group = interaction(`Days after seeding`, Condition_facet, Replicate)), color = "grey") +
+  geom_point(data = dat_background, aes(group = interaction(`Days after seeding`, Condition_facet, Replicate)), color = "grey", size = 2) +
+  geom_line(data = dat_interesting, aes(group = interaction(`Days after seeding`, Condition, Replicate))) +
+  geom_point(data = dat_interesting, aes(group = interaction(`Days after seeding`, Condition, Replicate)), size = 2) +
+  scale_y_continuous(limits = c(0.78, 1.200001), expand = c(0, 0)) +
+  geom_hline(yintercept = 1, linetype="dashed") +
+  scale_color_manual(
+    breaks = c("25%", "50%", "100%", "Serial", "Bulk", "Control", "Calibration resistor", "Measurement medium"),
+    values = c("25%" = "#F8766D", "50%" = "#DB8E00", "100%" = "#AEA200", "Serial" = "#64B200", "Bulk" = "#00BD5C", "Control" = "#00C1A7", "Calibration resistor" = "#00BADE", "Measurement medium" = "#00A6FF")) +
+  facet_wrap(~ factor(Condition_display, levels = c("25%", "50%", "100%", "Serial", "Bulk", "Control")), scales = "free") +
+  theme_prism(base_size = 22, base_line_size = 1.2) +
+  theme(panel.spacing.x = unit(1.5, "lines"), legend.key.spacing.y = unit(0.5, "lines"))
+```
+
+## Statistics Normalised: Effect of time on samples after PBS
+
+```{r}
+dat <- droplevels(after[!(after$Condition == "Control" & after$Replicate == 2),])
+dat$`Time (min)` <- factor(dat$`Time (min)`, levels = c(205, 225, 245, 265), labels = c("20 min", "40 min", "60 min", "80 min"))
+renamed_dat <- dat %>%
+  rename(Resistance = `Normalised resistance (AU)`) %>%
+  rename(Time = `Time (min)`)
+
+model <- lm(Resistance ~ Time * Condition, data = renamed_dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`Normalised resistance (AU)`",
+         facet.by = c("Time (min)", "Condition"),
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+shapiro_individual <- renamed_dat %>%
+  group_by(Time, Condition) %>%
+  shapiro_test(Resistance)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`Normalised resistance (AU)` ~ `Time (min)` * Condition)
+dat_summary <- dat %>%
+  group_by(`Time (min)`, Condition) %>%
+  get_summary_stats(`Normalised resistance (AU)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 3, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_Resistance <- emmeans(model, ~ Time * Condition, vcov. = vcovHC3)
+pairs(emm_Resistance, by = "Condition", adjust = "bonferroni")
+stat_Resistance <- summary(pairs(emm_Resistance, by = "Condition", adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_Resistance_pos <- stat_Resistance %>%
+  add_xy_position(
+    x = "Time",
+    data = renamed_dat,
+    formula = `Resistance` ~ Time,
+  ) %>%
+  mutate(
+    xmin = match(group1, levels(droplevels(renamed_dat$Time))),
+    xmax = match(group2, levels(droplevels(renamed_dat$Time))),
+  ) %>% 
+  group_by(Condition) %>%
+  mutate(
+    y.position = max(renamed_dat$Resistance[renamed_dat$Condition == unique(Condition)]) + (row_number() * max(renamed_dat$Resistance[renamed_dat$Condition == unique(Condition)])/10)
+    ) %>%
+  ungroup()
+```
+
+## Visualisation: 205-265 min
+
+```{r}
+dat <- after[!(after$Condition == "Control" & after$Replicate == 2),]
+dat$`Time (min)` <- factor(dat$`Time (min)`, levels = c(205, 225, 245, 265), labels = c(20, 40, 60, 80))
+y <- dat$`Normalised resistance (AU)`
+
+ggplot(data = dat, aes(x = `Time (min)`, y = y, color = Condition)) + 
+  xlab("Time (min)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 4, maxwidth = 0.5, scale = FALSE, alpha = 0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  scale_color_manual(
+    breaks = c("25%", "50%", "100%", "Serial", "Bulk", "Control", "Calibration resistor", "Measurement medium"),
+    values = c("25%" = "#F8766D", "50%" = "#DB8E00", "100%" = "#AEA200", "Serial" = "#64B200", "Bulk" = "#00BD5C", "Control" = "#00C1A7", "Calibration resistor" = "#00BADE", "Measurement medium" = "#00A6FF")) +
+  stat_pvalue_manual(
+    stat_Resistance_pos,
+    label = "p.adj.signif",
+    tip.length = 0.025,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  facet_wrap(~ factor(Condition, levels = c("25%", "50%", "100%", "Serial", "Bulk", "Control")), scales = "free") +
+  theme_prism(base_size = 28) +
+  theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"))
+
+
+```
+
+## Day 4: Statistics
+
+```{r}
+dat <- long[long$`Days after seeding` == 4 & long$`Time (min)` <= 80 & long$PBS == "Before PBS" & long$Condition != "Calibration resistor" & long$Condition != "Measurement medium",] %>%
+  group_by(Date, `Days after seeding`, `Time (min)`) %>%
+  mutate( 
+    `TEER (Ω*cm²)` = (`Resistance (Ω)` - mean(`Resistance (Ω)`[Condition == "Control"])) * 0.3359273609
+  ) %>%
+  ungroup() %>%
+  filter(Condition != "Control")
+dat$`Time (min)` <- as.factor(dat$`Time (min)`)
+renamed_dat <- dat %>%
+  rename(TEER = `TEER (Ω*cm²)`) %>%
+  rename(Time = `Time (min)`)
+
+model <- lm(TEER ~ Time * Condition, data = renamed_dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`TEER (Ω*cm²)`",
+         facet.by = c("Time (min)", "Condition"),
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+shapiro_individual <- renamed_dat %>%
+  group_by(Time, Condition) %>%
+  shapiro_test(TEER)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`TEER (Ω*cm²)` ~ `Time (min)` * Condition)
+dat_summary <- dat %>%
+  group_by(`Time (min)`, Condition) %>%
+  get_summary_stats(`TEER (Ω*cm²)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 3, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_TEER <- emmeans(model, ~ Time * Condition, vcov. = vcovHC3)
+pairs(emm_TEER, by = "Time", adjust = "bonferroni")
+stat_TEER <- summary(pairs(emm_TEER, by = "Time", adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_TEER_pos <- stat_TEER %>%
+  add_xy_position(
+    x = "Time",
+    group = "Condition",
+    data = renamed_dat,
+    formula = `TEER` ~ Condition,
+    dodge = 0.8 
+  ) %>%
+  group_by(Time) %>%
+  mutate(y.position = 350 + (row_number() * 30)) %>%
+  ungroup() %>%
+  rename(`Time (min)` = Time)
+```
+
+## Day 4: Visualisation
+
+```{r}
+dat <- long[long$`Days after seeding` == 4 & long$`Time (min)` <= 80 & long$PBS == "Before PBS" & long$Condition != "Calibration resistor" & long$Condition != "Measurement medium",] %>%
+  group_by(Date, `Days after seeding`, `Time (min)`) %>%
+  mutate( 
+    `TEER (Ω*cm²)` = (`Resistance (Ω)` - mean(`Resistance (Ω)`[Condition == "Control"])) * 0.3359273609
+  ) %>%
+  ungroup() %>%
+  filter(Condition != "Control")
+dat$`Time (min)` <- as.factor(dat$`Time (min)`)
+y <- dat$`TEER (Ω*cm²)`
+
+ggplot(data = dat, aes(x = `Time (min)`, y = y, color = Condition, group = interaction(`Time (min)`, Condition))) + 
+  xlab("Time (min)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(0, 700), expand = c(0, 0), oob = oob_keep, guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  geom_violin(width = 0.5, scale = "width", position = position_dodge(width = 0.8), alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 4, maxwidth = 0.5, position = position_dodge(width = 0.8), scale = FALSE, alpha = 0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, position = position_dodge(width = 0.8), shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, position = position_dodge(width = 0.8), colour = "black", linewidth = 1) +
+  scale_color_manual(
+    breaks = c("25%", "50%", "100%", "Serial", "Bulk", "Control", "Calibration resistor", "Measurement medium"),
+    values = c("25%" = "#F8766D", "50%" = "#DB8E00", "100%" = "#AEA200", "Serial" = "#64B200", "Bulk" = "#00BD5C", "Control" = "#00C1A7", "Calibration resistor" = "#00BADE", "Measurement medium" = "#00A6FF")) +
+  stat_pvalue_manual(
+    stat_TEER_pos,
+    label = "p.adj.signif",
+    tip.length = 0,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  theme_prism(base_size = 28) +
+  theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"))
+
+```
+
+# Best condition
+
+## Visualisation: Data at different minutes before PBS
+
+```{r}
+dat <- long[long$`Time (min)` <= 80 & long$PBS == "Before PBS",]
+dat$`Time (min)` <- paste0(as.character(dat$`Time (min)`), " min")
+
+lapply(split(dat, dat$`Time (min)`), function(z) {
+  control_conditions <- c("Calibration resistor", "Measurement medium", "Control")
+  interesting_conditions <- setdiff(unique(z$Condition), control_conditions)
+  dat_background <- z %>%
+    filter(Condition %in% interesting_conditions) %>%
+    mutate(Condition_facet = Condition) %>%
+    crossing(Condition_display = interesting_conditions) %>%
+    filter(Condition_facet != Condition_display)
+  dat_interesting <- z %>%
+    filter(Condition %in% interesting_conditions) %>%
+    mutate(Condition_display = Condition)
+  dat_control <- z %>%
+    filter(Condition %in% control_conditions) %>%
+    crossing(Condition_display = interesting_conditions)
+  ggplot(data = z, aes(x = `Days after seeding`, y = `Resistance (Ω)`)) + 
+    geom_line(data = dat_control,
+              aes(color = Condition, 
+                  group = interaction(Condition, Replicate))
+              ) +
+    geom_point(data = dat_control,
+              aes(color = Condition, 
+                  group = interaction(Condition, Replicate)), size = 2
+              ) +
+    geom_line(data = dat_background,
+              aes(group = interaction(Condition_facet, Replicate)),
+              color = "grey") +
+    geom_point(data = dat_background,
+              aes(group = interaction(Condition_facet, Replicate)),
+              color = "grey", size = 2) +
+    geom_line(data = dat_interesting,
+              aes(color = Condition, 
+                  group = interaction(Condition, Replicate))
+              ) +
+    geom_point(data = dat_interesting,
+              aes(color = Condition, 
+                  group = interaction(Condition, Replicate)), size = 2
+              ) +
+    scale_y_continuous(limits = c(0, 3200), expand = c(0, 0), guide = guide_prism_minor()) +
+    scale_x_continuous(limits = c(0, 16), expand = c(0, 0), guide = guide_prism_minor(), minor_breaks = seq(0, 16, 1)) +
+    facet_wrap(~ factor(Condition_display, levels = c("25%", "50%", "100%", "Serial", "Bulk")), scales = "free") +
+    scale_color_manual(
+    breaks = c("25%", "50%", "100%", "Serial", "Bulk", "Control", "Calibration resistor", "Measurement medium"),
+    values = c("25%" = "#F8766D", "50%" = "#DB8E00", "100%" = "#AEA200", "Serial" = "#64B200", "Bulk" = "#00BD5C", "Control" = "#00C1A7", "Calibration resistor" = "#00BADE", "Measurement medium" = "#00A6FF")) +
+    theme_prism(base_size = 22, base_line_size = 1.2) +
+    theme(panel.spacing.x = unit(1.5, "lines"), legend.key.spacing.y = unit(0.5, "lines")) +
+    labs(title = z$`Time (min)`)
+})
+```
+
+## Metrics: CV
+
+```{r}
+dat <- long[long$`Time (min)` == 20 & long$PBS == "Before PBS" & !is.na(long$Plate),]
+cv <- dat %>%
+  filter(!is.na(Plate)) %>%
+  group_by(Condition, Replicate) %>%
+  arrange(`Days after seeding`) %>%
+  mutate(CV = rollapply(
+    data = `Resistance (Ω)`,
+    width = 3,
+    FUN = function(x) {
+      sd(x)/mean(x) * 100
+    },
+    align = "right",
+    fill = NA
+  )) %>%
+  ungroup() %>% 
+  mutate(`CV <= 10%` = case_when(
+    CV <= 10 ~ TRUE,
+    CV > 10 ~ FALSE,
+    TRUE ~ NA
+  ))
+
+cv_nodip <- dat[dat$`Days after seeding` != 11,] %>%
+  filter(!is.na(Plate)) %>%
+  group_by(Condition, Replicate) %>%
+  arrange(`Days after seeding`) %>%
+  mutate(CV = rollapply(
+    data = `Resistance (Ω)`,
+    width = 3,
+    FUN = function(x) {
+      sd(x)/mean(x) * 100
+    },
+    align = "right",
+    fill = NA
+  )) %>%
+  ungroup() %>% 
+  mutate(`CV <= 10%` = case_when(
+    CV <= 10 ~ TRUE,
+    CV > 10 ~ FALSE,
+    TRUE ~ NA
+  ))
+```
+
+## Visualisation: CV
+
+```{r}
+dat <- cv
+x <- factor(dat$Replicate)
+y <- reorder(dat$`Days after seeding`, desc(dat$`Days after seeding`))
+
+ggplot(data = dat, aes(x = x, y = y, color = `CV <= 10%`)) + 
+  geom_point(shape = 16, size = 8) +
+  xlab("Replicate") +
+  ylab("Days after seeding") +
+  facet_wrap(~ Condition) +
+  theme_prism(base_size = 22, base_line_size = 1.2) +
+  theme(axis.line = element_blank(), axis.ticks = element_blank(), panel.spacing.x = unit(1.5, "lines"), legend.title = element_text(), legend.title.position = "top")
+
+dat <- cv_nodip
+x <- factor(dat$Replicate)
+y <- reorder(dat$`Days after seeding`, desc(dat$`Days after seeding`))
+
+ggplot(data = dat, aes(x = x, y = y, color = `CV <= 10%`)) + 
+  geom_point(shape = 16, size = 8) +
+  xlab("Replicate") +
+  ylab("Days after seeding") +
+  facet_wrap(~ Condition) +
+  theme_prism(base_size = 22, base_line_size = 1.2) +
+  theme(axis.line = element_blank(), axis.ticks = element_blank(), panel.spacing.x = unit(1.5, "lines"), legend.title = element_text(), legend.title.position = "top")
+```
+
+# Final day
+
+## Visualisation
+
+```{r}
+dat <- long[long$`Days after seeding` == max(long$`Days after seeding`) & long$Condition != "Calibration resistor" & long$Condition != "Measurement medium",]
+
+control_conditions <- c("")
+interesting_conditions <- setdiff(unique(dat$Condition), control_conditions)
+dat_background <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_facet = Condition) %>%
+  crossing(Condition_display = interesting_conditions) %>%
+  filter(Condition_facet != Condition_display)
+dat_interesting <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_display = Condition)
+dat_control <- dat %>%
+  filter(Condition %in% control_conditions) %>%
+  crossing(Condition_display = interesting_conditions)
+dat_interesting <- rbind(dat_interesting, dat_control)
+
+ggplot(data = dat, aes(x = `Time (min)`, y = `Resistance (Ω)`, color = Condition)) + 
+  annotate("rect", xmin = 165, xmax = 195, ymin = 200, ymax = 800, alpha = .5, fill = "lightblue") +
+  geom_rect(aes(xmin = 0, xmax = 0, ymin = 0, ymax = 0, fill = "Incubation in PBS"), alpha = 0.5, inherit.aes = FALSE) +
+  geom_line(data = dat_background, aes(group = interaction(`Days after seeding`, Condition_facet, Replicate)), color = "grey") +
+  geom_point(data = dat_background, aes(group = interaction(`Days after seeding`, Condition_facet, Replicate)), color = "grey", size = 2) +
+  geom_line(data = dat_interesting, aes(group = interaction(`Days after seeding`, Condition, Replicate))) +
+  geom_point(data = dat_interesting, aes(group = interaction(`Days after seeding`, Condition, Replicate)), size = 2) +
+  scale_x_continuous(limits = c(0, 280), expand = c(0, 0), guide = guide_prism_minor(), breaks = seq(0, 280, 100), minor_breaks = seq(0, 280, 20)) +
+  scale_y_continuous(limits = c(200, 800), expand = c(0, 0), guide = guide_prism_minor(), breaks = seq(200, 800, 200), minor_breaks = seq(200, 800, 100)) +
+  scale_fill_manual(values = "lightblue") +
+  scale_color_manual(
+    breaks = c("25%", "50%", "100%", "Serial", "Bulk", "Control", "Calibration resistor", "Measurement medium"),
+    values = c("25%" = "#F8766D", "50%" = "#DB8E00", "100%" = "#AEA200", "Serial" = "#64B200", "Bulk" = "#00BD5C", "Control" = "#00C1A7", "Calibration resistor" = "#00BADE", "Measurement medium" = "#00A6FF")) +
+  facet_wrap(~ factor(Condition_display, levels = c("25%", "50%", "100%", "Serial", "Bulk", "Control")), scales = "free") +
+  theme_prism(base_size = 22, base_line_size = 1.2) +
+  theme(panel.spacing.x = unit(1.5, "lines"), legend.key.spacing.y = unit(0.5, "lines"))
+
+```
+
+## Statistics Resistance: Effect of EIS and PBS on samples
+
+```{r}
+dat <- long[long$`Days after seeding` == 15 & long$`Time (min)` >= 80 & long$`Time (min)` <= 225 & long$Condition != "Calibration resistor" & long$Condition != "Measurement medium" & !(long$Condition == "Control" & long$Replicate == 2),]
+dat$`Time (min)` <- factor(dat$`Time (min)`, levels = c(80, 140, 205, 225), labels = c("80 min", "140 min", "205 min", "225 min"))
+renamed_dat <- dat %>%
+  rename(Resistance = `Resistance (Ω)`) %>%
+  rename(Time = `Time (min)`)
+
+model <- lm(Resistance ~ Time * Condition, data = renamed_dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`Resistance (Ω)`",
+         facet.by = c("Time (min)", "Condition"),
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+shapiro_individual <- renamed_dat %>%
+  group_by(Time, Condition) %>%
+  shapiro_test(Resistance)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`Resistance (Ω)` ~ `Time (min)` * Condition)
+dat_summary <- dat %>%
+  group_by(`Time (min)`, Condition) %>%
+  get_summary_stats(`Resistance (Ω)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 3, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_Resistance <- emmeans(model, ~ Time * Condition, vcov. = vcovHC3)
+pairs(emm_Resistance, by = "Condition", adjust = "bonferroni")
+stat_Resistance <- summary(pairs(emm_Resistance, by = "Condition", adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_Resistance_pos <- stat_Resistance %>%
+  add_xy_position(
+    x = "Time",
+    data = renamed_dat,
+    formula = `Resistance` ~ Time,
+  ) %>%
+  mutate(
+    xmin = match(group1, levels(droplevels(renamed_dat$Time))),
+    xmax = match(group2, levels(droplevels(renamed_dat$Time))),
+  ) %>% 
+  group_by(Condition) %>%
+  mutate(
+    y.position = case_when(
+      Condition != "Control" ~ 750 + (row_number() * 100),
+    TRUE ~ 280 + (row_number() * 10)
+    )) %>%
+  ungroup()
+```
+
+## Visualisation: 80-225 min
+
+```{r}
+dat <- long[long$`Days after seeding` == 15 & long$`Time (min)` >= 80 & long$`Time (min)` <= 225 & long$Condition != "Calibration resistor" & long$Condition != "Measurement medium" & !(long$Condition == "Control" & long$Replicate == 2),]
+dat$`Time (min)` <- as.factor(dat$`Time (min)`)
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = `Time (min)`, y = y, color = Condition)) + 
+  xlab("Time (min)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 4, maxwidth = 0.5, scale = FALSE, alpha = 0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  scale_color_manual(
+    breaks = c("25%", "50%", "100%", "Serial", "Bulk", "Control", "Calibration resistor", "Measurement medium"),
+    values = c("25%" = "#F8766D", "50%" = "#DB8E00", "100%" = "#AEA200", "Serial" = "#64B200", "Bulk" = "#00BD5C", "Control" = "#00C1A7", "Calibration resistor" = "#00BADE", "Measurement medium" = "#00A6FF")) +
+  stat_pvalue_manual(
+    stat_Resistance_pos,
+    label = "p.adj.signif",
+    tip.length = 0.025,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  facet_wrap(~ factor(Condition, levels = c("25%", "50%", "100%", "Serial", "Bulk", "Control")), scales = "free") +
+  theme_prism(base_size = 28) +
+  theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"))
+
+
+```
+
+# Meta
+
+## Measurement medium
+
+### Data
+
+Day 1 is removed due to contamination of the measurement medium with trace amount of distilled water
+
+```{r}
+
+experiment1_medium <- long[long$`Days after seeding` != 1 & long$PBS == "Before PBS" & long$Condition == "Measurement medium",]
+
+```
+
+### Visualisation
+
+```{r}
+dat <- experiment1_medium
+x <- rep("Experiment 1", length(dat$`Resistance (Ω)`))
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+```
+
+## Controls
+
+### Data
+
+```{r}
+experiment1_control <- long[long$PBS == "Before PBS" & long$Condition == "Control" & long$Replicate != 2,]
+```
+
+### Visualisation
+
+```{r}
+dat <- experiment1_control
+x <- rep("Experiment 1", length(dat$`Resistance (Ω)`))
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(200, 400), expand = c(0, 0)) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+
+```
+
+## HCE-T
+
+### Metrics: nTEER
+
+Control at every timepoint and incubation in PBS only at day 15 after cell seeding
+
+```{r}
+TEER <- long[!(long$Condition == "Control" & long$Replicate == 2),] %>%
+  filter(`Time (min)` == 20, !is.na(Plate)) %>%
+  group_by(Date, `Days after seeding`) %>%
+  mutate( 
+    `TEER (Ω*cm²)` = (`Resistance (Ω)` - mean(`Resistance (Ω)`[Condition == "Control"])) * 0.3359273609
+  ) %>%
+  ungroup()
+
+
+nTEER <- long[!(long$Condition == "Control" & long$Replicate == 2),] %>%
+  filter(`Days after seeding` == 15, !is.na(Plate)) %>%
+  group_by(Date, `Days after seeding`, Condition, Replicate) %>%
+  reframe( 
+    `nTEER (Ω*cm²)` = (`Resistance (Ω)`[`Time (min)` == 20] - `Resistance (Ω)`[`Time (min)` == 225]) * 0.3359273609
+  )
+```
+
+### Data
+
+Limiting 100% data points to the 20 minute mark for consistency
+
+```{r}
+experiment1_hcet_resistance <- long[long$PBS == "Before PBS" & long$Condition == "100%" & long$`Time (min)` == 20,]
+experiment1_hcet_TEER <- TEER[TEER$Condition == "100%",]
+experiment1_hcet_nTEER <- nTEER[nTEER$Condition == "100%",]
+```
+
+### Visualisation
+
+```{r}
+dat <- experiment1_hcet_resistance
+x <- rep("Experiment 1", length(dat$`Resistance (Ω)`))
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+
+dat <- experiment1_hcet_TEER
+x <- rep("Experiment 1", length(dat$`TEER (Ω*cm²)`))
+y <- dat$`TEER (Ω*cm²)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+
+dat <- experiment1_hcet_nTEER
+x <- rep("Experiment 1", length(dat$`nTEER (Ω*cm²)`))
+y <- dat$`nTEER (Ω*cm²)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+
+```

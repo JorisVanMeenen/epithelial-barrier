@@ -1,0 +1,706 @@
+---
+title: "09_ALI-Tracers"
+author: "Joris Van Meenen"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+## Tracers
+
+# Setup
+
+## Load modules
+
+```{r}
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(ggprism)
+library(ggforce)
+library(stringr)
+library(ggpubr)
+library(rstatix)
+library(emmeans)
+library(tidyr)
+library(scales)
+library(ggstatsplot)
+library(sandwich)
+
+set.seed(42)
+```
+
+## Load data
+
+```{r}
+long <- data.frame()
+
+dir <- "D://Documents//Work//Data//Cornea-on-chip//Epithelial barrier//09_ALI//Tecan"
+
+controlList <- c("JVM_Tracers (Modified)_20260220_161638.xlsx")
+
+xlsxList <- list.files(path = dir, pattern = "*.xlsx", full.names = TRUE, ignore.case = TRUE)
+
+for (xlsx in xlsxList) {
+  
+  plate <- basename(xlsx)
+  
+  df <- read_xlsx(
+    file.path(xlsx),
+    skip = 44
+  )
+  
+  if (plate %in% controlList) {
+    
+    fluorescence <- df[c(1:8, 35:42, 69:76),2:6]
+    condition <- rep(c("Fluorescein", "TRITC-Dextran", "TR-Albumin", "DMEM/F12", "PBS"), times = 8*3)
+    emission <- rep(c("TR-Albumin", "TRITC-Dextran", "Fluorescein"), each = 40)
+    
+  } else {
+    
+    fluorescence <- df[c(1:8, 35:42, 69:76),2:13]
+    if (match(xlsx, xlsxList) - 1 > 5) {
+      
+      condition <- rep(c("HCE-T", "ALI hydrated", "Hydrogel control", "ALI dry", "Hydrogel HCE-T", "Shear stress", "Tears", "Control", "Tracer 1:100", "DMEM/F12", "PBS", "Tracer"), times = 8*3)
+      
+    } else {
+      
+      condition <- rep(c("HCE-T", "ALI hydrated", "Hydrogel control", "ALI dry", "Hydrogel HCE-T", "Control", "Tears", "Shear stress", "Tracer 1:100", "DMEM/F12", "PBS", "Tracer"), times = 8*3)
+      
+    }
+    
+    emission <- rep(c("TR-Albumin", "TRITC-Dextran", "Fluorescein"), each = 96)
+    
+  }
+  
+  fluorescence <- as.vector(t(fluorescence))
+  fluorescence <- fluorescence[!is.na(fluorescence) > 0]
+  fluorescence<- as.numeric(fluorescence)
+  plate <- rep(plate, length(fluorescence))
+  replicate <- rep(match(xlsx, xlsxList) - 1, length(fluorescence))
+  
+  df <- data.frame(
+    "Plate" = plate,
+    "Emission" = emission,
+    "Condition" = condition,
+    "Replicate" = replicate,
+    "Fluorescence (RFU)" = fluorescence, 
+    check.names = FALSE
+  )
+
+  long <- dplyr::bind_rows(long, df)
+  
+}
+
+long[!(long$Condition %in% c("Tracer 1:100", "DMEM/F12", "PBS", "Tracer", "Fluorescein", "TRITC-Dextran", "TR-Albumin")), "Time (min)"] <- rep(c(5, 20, 35, 50, 65, 80, 95, 110), each = 8, times = 3)
+
+long[long$Condition == "Tracer 1:100", "Concentration (µg/mL)"] <- rep(c(1.32, 0.132, 0.0132, 0.00132, 0.000132, 0.0000132, 0.00000132, 0.000000132), times = nrow(long[long$Condition == "Tracer 1:100",]) / 8)
+
+long[long$Condition == "Tracer", "Concentration (µg/mL)"] <- rep(c(132, 13.2, 1.32, 0.132, 0.0132, 0.00132, 0.000132, 0.0000132), times = nrow(long[long$Condition == "Tracer 1:100",]) / 8)
+
+long[long$Condition %in% c("Fluorescein", "TRITC-Dextran", "TR-Albumin"), "Concentration (µg/mL)"] <- rep(c(132, 13.2, 1.32, 0.132, 0.0132, 0.00132, 0.000132, 0.0000132), each = 3)
+
+long$Condition <- factor(long$Condition, levels = c("HCE-T", "Hydrogel control", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry", "Shear stress", "Control", "Tracer", "Tracer 1:100", "Fluorescein", "TRITC-Dextran", "TR-Albumin", "DMEM/F12", "PBS"))
+
+
+long
+
+```
+
+## Filter outliers
+
+```{r}
+long <- long %>%
+  filter(!(Condition == "Hydrogel HCE-T" & (Replicate == 6 | Replicate == 9)))
+```
+
+# Calibration
+
+## Limit of detection and quantification
+
+```{r}
+
+blank <- long[long$Emission == "Fluorescein" & long$Condition =="DMEM/F12",]$`Fluorescence (RFU)`
+lodFluo <- mean(blank) + (3 * sd(blank))
+loqFluo <- mean(blank) + (10 * sd(blank))
+
+dat <- long[!(is.na(long$`Concentration (µg/mL)`)) & long$Emission == "Fluorescein" & long$Condition %in% c("Fluorescein", "Tracer 1:100", "Tracer"),]
+x <- dat$`Concentration (µg/mL)`
+y <- dat$`Fluorescence (RFU)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition, group = interaction(Replicate, Condition))) +
+  scale_x_continuous(trans = "log10") +
+  scale_y_continuous(trans = "log2") +
+  annotate("rect", fill = "red", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = lodFluo, ymax = loqFluo) +
+  annotate("rect", fill = "green", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = loqFluo, ymax = Inf) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  geom_point() +
+  geom_line() +
+  #facet_wrap(~ Emission) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713)
+
+blank <- long[long$Emission == "TRITC-Dextran" & long$Condition =="DMEM/F12",]$`Fluorescence (RFU)`
+lodTRITC <- mean(blank) + (3 * sd(blank))
+loqTRITC <- mean(blank) + (10 * sd(blank))
+
+dat <- long[!(is.na(long$`Concentration (µg/mL)`)) & long$Emission == "TRITC-Dextran" & long$Condition %in% c("TRITC-Dextran", "Tracer 1:100", "Tracer"),]
+x <- dat$`Concentration (µg/mL)`
+y <- dat$`Fluorescence (RFU)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition, group = interaction(Replicate, Condition))) +
+  scale_x_continuous(trans = "log10") +
+  scale_y_continuous(trans = "log2") +
+  annotate("rect", fill = "red", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = lodTRITC, ymax = loqTRITC) +
+  annotate("rect", fill = "green", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = loqTRITC, ymax = Inf) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  geom_point() +
+  geom_line() +
+  #facet_wrap(~ Emission) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713)
+
+blank <- long[long$Emission == "TR-Albumin" & long$Condition =="DMEM/F12",]$`Fluorescence (RFU)`
+lodTR <- mean(blank) + (3 * sd(blank))
+loqTR <- mean(blank) + (10 * sd(blank))
+
+dat <- long[!(is.na(long$`Concentration (µg/mL)`)) & long$Emission == "TR-Albumin" & long$Condition %in% c("TR-Albumin", "Tracer 1:100", "Tracer"),]
+x <- dat$`Concentration (µg/mL)`
+y <- dat$`Fluorescence (RFU)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition, group = interaction(Replicate, Condition))) +
+  scale_x_continuous(trans = "log10") +
+  scale_y_continuous(trans = "log2") +
+  annotate("rect", fill = "red", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = lodTR, ymax = loqTR) +
+  annotate("rect", fill = "green", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = loqTR, ymax = Inf) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  geom_point() +
+  geom_line() +
+  #facet_wrap(~ Emission) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713)
+
+```
+
+## SNR investigation
+
+```{r}
+
+dat <- long[long$Emission == "Fluorescein" & long$Condition %in% c("DMEM/F12", "PBS"),]
+x <- dat$Plate
+y <- dat$`Fluorescence (RFU)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 1) +
+  geom_sina(size = 2, maxwidth = 1) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_x_discrete(labels = c(0:10)) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713)
+
+dat <- long[long$Emission == "TRITC-Dextran" & long$Condition %in% c("DMEM/F12", "PBS"),]
+x <- dat$Plate
+y <- dat$`Fluorescence (RFU)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 1) +
+  geom_sina(size = 2, maxwidth = 1) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_x_discrete(labels = c(0:10)) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713)
+
+dat <- long[long$Emission == "TR-Albumin" & long$Condition %in% c("DMEM/F12", "PBS"),]
+x <- dat$Plate
+y <- dat$`Fluorescence (RFU)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 1) +
+  geom_sina(size = 2, maxwidth = 1) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_x_discrete(labels = c(0:10)) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713)
+
+
+```
+
+## Fluorescence crosstalk investigation
+
+```{r, fig.height=4, fig.width=12}
+
+dat <- long[!(is.na(long$`Concentration (µg/mL)`)) & long$Emission == "Fluorescein" & long$Condition %in% c("Fluorescein", "TRITC-Dextran", "TR-Albumin"),]
+x <- dat$`Concentration (µg/mL)`
+y <- dat$`Fluorescence (RFU)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition, group = interaction(Replicate, Condition))) +
+  scale_x_continuous(trans = "log10") +
+  scale_y_continuous(trans = "log2") +
+  annotate("rect", fill = "red", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = lodFluo, ymax = loqFluo) +
+  annotate("rect", fill = "green", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = loqFluo, ymax = Inf) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  geom_point() +
+  geom_line() +
+  #facet_wrap(~ factor(Condition, levels = c("Fluorescein", "TRITC-Dextran", "TR-Albumin"))) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713)
+
+dat <- long[!(is.na(long$`Concentration (µg/mL)`)) & long$Emission == "TRITC-Dextran" & long$Condition %in% c("Fluorescein", "TRITC-Dextran", "TR-Albumin"),]
+x <- dat$`Concentration (µg/mL)`
+y <- dat$`Fluorescence (RFU)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition, group = interaction(Replicate, Condition))) +
+  scale_x_continuous(trans = "log10") +
+  scale_y_continuous(trans = "log2") +
+  annotate("rect", fill = "red", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = lodTRITC, ymax = loqTRITC) +
+  annotate("rect", fill = "green", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = loqTRITC, ymax = Inf) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  geom_point() +
+  geom_line() +
+  #facet_wrap(~ factor(Condition, levels = c("Fluorescein", "TRITC-Dextran", "TR-Albumin"))) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713)
+
+
+dat <- long[!(is.na(long$`Concentration (µg/mL)`)) & long$Emission == "TR-Albumin" & long$Condition %in% c("Fluorescein", "TRITC-Dextran", "TR-Albumin"),]
+x <- dat$`Concentration (µg/mL)`
+y <- dat$`Fluorescence (RFU)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition, group = interaction(Replicate, Condition))) +
+  scale_x_continuous(trans = "log10") +
+  scale_y_continuous(trans = "log2") +
+  annotate("rect", fill = "red", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = lodTR, ymax = loqTR) +
+  annotate("rect", fill = "green", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = loqTR, ymax = Inf) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  geom_point() +
+  geom_line() +
+  #facet_wrap(~ factor(Condition, levels = c("Fluorescein", "TRITC-Dextran", "TR-Albumin"))) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713)
+```
+
+## Calculate concentration
+
+```{r}
+
+dat <- long[!(is.na(long$`Concentration (µg/mL)`)) & long$Emission == "Fluorescein" & long$Condition %in% c("Fluorescein", "Tracer 1:100", "Tracer"),] %>%
+  filter(`Fluorescence (RFU)` >= loqFluo)
+
+calibration <- lm(`Concentration (µg/mL)` ~ `Fluorescence (RFU)`, data = dat)
+dat["test"] <- predict(calibration, dat)
+
+summary(calibration)
+
+x <- dat$`Concentration (µg/mL)`
+y <- dat$`Fluorescence (RFU)`
+
+ggplot(data = dat, aes(x = x, y = y)) +
+  geom_line(color='black',data = dat, aes(x=test, y=y)) +
+  geom_smooth(method='lm', formula= y~x) +
+  #scale_x_continuous(trans = "log10") +
+  #scale_y_continuous(trans = "log2") +
+  annotate("rect", fill = "red", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = lodFluo, ymax = loqFluo) +
+  annotate("rect", fill = "green", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = loqFluo, ymax = Inf) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  geom_point(aes(color = Condition, group = interaction(Replicate, Condition))) +
+  #facet_wrap(~ Emission) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713)
+
+```
+
+# Fluorescence
+
+### Visualise data
+
+```{r}
+
+dat <- long[!is.na(long$`Time (min)`) & long$Emission == "Fluorescein",]
+x <- dat$`Time (min)`
+y <- dat$`Fluorescence (RFU)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition, group = interaction(Replicate, Condition))) +
+  #scale_y_continuous(trans = "log2") +
+  annotate("rect", fill = "red", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = lodFluo, ymax = loqFluo) +
+  annotate("rect", fill = "green", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = loqFluo, ymax = Inf) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~ Emission) +
+  scale_color_manual(
+    breaks = c("HCE-T", "Hydrogel control", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry", "Shear stress", "Control", "Calibration resistor", "Measurement medium", "Artificial tears"),
+    values = c("HCE-T" = "#F8766D", "Hydrogel control" = "#DB8E00", "Hydrogel HCE-T" = "#AEA200", "Tears" = "#64B200", "ALI hydrated" = "#00BD5C", "ALI dry" = "#00C1A7", "Shear stress" = "#00BADE", "Control" = "#00A6FF", "Calibration resistor" = "#B385FF", "Measurement medium" = "#EF67EB", "Artificial tears" = "#FF63B6")) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713)
+
+dat <- long[!is.na(long$`Time (min)`) & long$Emission == "TRITC-Dextran",]
+x <- dat$`Time (min)`
+y <- dat$`Fluorescence (RFU)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition, group = interaction(Replicate, Condition))) +
+  #scale_y_continuous(trans = "log2") +
+  annotate("rect", fill = "red", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = lodTRITC, ymax = loqTRITC) +
+  annotate("rect", fill = "green", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = loqTRITC, ymax = Inf) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~ Emission) +
+  scale_color_manual(
+    breaks = c("HCE-T", "Hydrogel control", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry", "Shear stress", "Control", "Calibration resistor", "Measurement medium", "Artificial tears"),
+    values = c("HCE-T" = "#F8766D", "Hydrogel control" = "#DB8E00", "Hydrogel HCE-T" = "#AEA200", "Tears" = "#64B200", "ALI hydrated" = "#00BD5C", "ALI dry" = "#00C1A7", "Shear stress" = "#00BADE", "Control" = "#00A6FF", "Calibration resistor" = "#B385FF", "Measurement medium" = "#EF67EB", "Artificial tears" = "#FF63B6")) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713)
+
+dat <- long[!is.na(long$`Time (min)`) & long$Emission == "TR-Albumin",]
+x <- dat$`Time (min)`
+y <- dat$`Fluorescence (RFU)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition, group = interaction(Replicate, Condition))) +
+  #scale_y_continuous(trans = "log2") +
+  annotate("rect", fill = "red", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = lodTR, ymax = loqTR) +
+  annotate("rect", fill = "green", alpha = 0.5, 
+        xmin = 0, xmax = Inf,
+        ymin = loqTR, ymax = Inf) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~ Emission) +
+  scale_color_manual(
+    breaks = c("HCE-T", "Hydrogel control", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry", "Shear stress", "Control", "Calibration resistor", "Measurement medium", "Artificial tears"),
+    values = c("HCE-T" = "#F8766D", "Hydrogel control" = "#DB8E00", "Hydrogel HCE-T" = "#AEA200", "Tears" = "#64B200", "ALI hydrated" = "#00BD5C", "ALI dry" = "#00C1A7", "Shear stress" = "#00BADE", "Control" = "#00A6FF", "Calibration resistor" = "#B385FF", "Measurement medium" = "#EF67EB", "Artificial tears" = "#FF63B6")) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713)
+
+```
+
+### Filter based on LOQ
+
+```{r}
+
+long[!is.na(long$`Time (min)`) & long$Emission== "Fluorescein",]
+
+filtered <- long[!is.na(long$`Time (min)`) & long$Emission== "Fluorescein",] %>%
+  filter(`Fluorescence (RFU)` >= loqFluo)
+
+filtered$`Concentration (µg/mL)` <- predict(calibration, filtered)
+
+filtered <- filtered %>%
+  mutate(`Time (s)` = `Time (min)` * 60) %>%
+  arrange(Condition, Replicate, `Time (s)`) %>% 
+  group_by(Condition, Replicate) %>% 
+  mutate(
+    concentration_cumsum = lag(cumsum(`Concentration (µg/mL)`), default = 0),
+    `Mass (µg)` = (`Concentration (µg/mL)` * 1) + (concentration_cumsum * 0.1)
+  ) %>% 
+  ungroup()
+
+filtered
+
+```
+
+### Calculate metrics
+
+```{r}
+
+metrics <- filtered %>%
+  group_by(Emission, Condition, Replicate) %>%
+  summarise(
+    `Slope (RFU/min)` = coefficients(lm(`Fluorescence (RFU)` ~ `Time (min)`))[2],
+    `Slope (µg/s)` = coefficients(lm(`Mass (µg)` ~ `Time (s)`))[2]
+  )
+
+normalisedMetrics <- metrics %>%
+  group_by(Emission) %>%
+  mutate(
+    `Normalised slope RFU (AU)` = case_when(
+      str_detect(Condition, "Hydrogel HCE-T") ~ `Slope (RFU/min)` / mean(`Slope (RFU/min)`[Condition == "Hydrogel control"]),
+      TRUE ~ `Slope (RFU/min)` / mean(`Slope (RFU/min)`[Condition == "Control"])
+      ),
+    `Normalised slope (AU)` = case_when(
+      str_detect(Condition, "Hydrogel HCE-T") ~ `Slope (µg/s)` / mean(`Slope (µg/s)`[Condition == "Hydrogel control"]),
+      TRUE ~ `Slope (µg/s)` / mean(`Slope (µg/s)`[Condition == "Control"])
+      ),
+    `Permeability (cm/s)` = `Slope (µg/s)` / (0.3359273609 * 132)
+    ) %>%
+  ungroup()
+
+```
+
+### Statistics
+
+```{r}
+
+dat <- normalisedMetrics[normalisedMetrics$Emission == "Fluorescein" & normalisedMetrics$Condition != "Control" & normalisedMetrics$Condition != "Hydrogel control",]
+dat$`Permeability (cm/s)` <- dat$`Permeability (cm/s)` * 1e7
+renamed_dat <- dat %>%
+  rename(Slope = `Permeability (cm/s)`)
+
+model <- lm(`Permeability (cm/s)` ~ Condition, data = dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`Permeability (cm/s)`",
+         facet.by = "Condition",
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+renamed_dat %>%
+  group_by(Condition) %>%
+  shapiro_test(Slope)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`Permeability (cm/s)` ~ Condition)
+dat_summary <- dat %>%
+  group_by(Condition) %>%
+  get_summary_stats(`Permeability (cm/s)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 2, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_normalised <- emmeans(model, ~ Condition, vcov. = vcovHC3)
+pairs(emm_normalised, adjust = "bonferroni")
+stat_normalised <- summary(pairs(emm_normalised, adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_normalised_pos <- stat_normalised %>%
+  add_xy_position(
+    x = "Condition",
+    data = dat,
+    formula = `Permeability (cm/s)` ~ Condition,
+  ) %>%
+  mutate(y.position = 25 + (row_number() * 2)) %>%
+  mutate(
+    xmin = match(group1, levels(droplevels(dat$Condition))),
+    xmax = match(group2, levels(droplevels(dat$Condition))),
+  )
+
+
+```
+
+### Visualise slopes
+
+```{r}
+
+dat <- metrics[metrics$Emission == "Fluorescein",]
+x <- dat$Condition
+y <- dat$`Slope (RFU/min)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 1) +
+  geom_sina(size = 2, maxwidth = 1) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  #scale_y_continuous(limits = c(0, 2000), expand = c(0, 0)) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713, axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+
+dat <- normalisedMetrics[normalisedMetrics$Emission == "Fluorescein" & normalisedMetrics$Condition != "Control" & normalisedMetrics$Condition != "Hydrogel control",]
+#dat <- normalisedMetrics[normalisedMetrics$Emission == "Fluorescein",]
+x <- dat$Condition
+y <- dat$`Permeability (cm/s)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 1) +
+  geom_sina(size = 2, maxwidth = 1) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  #scale_y_continuous(limits = c(0, 2000), expand = c(0, 0)) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713, axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+
+dat <- normalisedMetrics[normalisedMetrics$Emission == "Fluorescein" & normalisedMetrics$Condition != "Control" & normalisedMetrics$Condition != "Hydrogel control",]
+dat$`Permeability (cm/s)` <- dat$`Permeability (cm/s)` * 1e7
+#dat <- normalisedMetrics[normalisedMetrics$Emission == "Fluorescein",]
+x <- dat$Condition
+y <- dat$`Permeability (cm/s)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 6, maxwidth = 0.5, scale = FALSE, alpha =
+    0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  #ylab("Permeability (10^-7 cm/s)") +
+  #ylab(paste0("Permeability (", expression(10^{"-7"}), " cm/s)")) +
+  ylab(expression(P[app]~(10^{"-7"}~cm/s))) +
+  #scale_y_continuous(limits = c(0, 2.5), expand = c(0, 0), oob = oob_keep, guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  stat_pvalue_manual(
+    stat_normalised_pos,
+    label = "p.adj.signif",
+    tip.length = 0,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  #geom_hline(yintercept = 1, linetype="dashed") +
+  scale_color_manual(
+    breaks = c("HCE-T", "Hydrogel control", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry", "Shear stress", "Control", "Calibration resistor", "Measurement medium", "Artificial tears"),
+    values = c("HCE-T" = "#F8766D", "Hydrogel control" = "#DB8E00", "Hydrogel HCE-T" = "#AEA200", "Tears" = "#64B200", "ALI hydrated" = "#00BD5C", "ALI dry" = "#00C1A7", "Shear stress" = "#00BADE", "Control" = "#00A6FF", "Calibration resistor" = "#B385FF", "Measurement medium" = "#EF67EB", "Artificial tears" = "#FF63B6")) +
+  theme_prism(base_size = 28) +
+  theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"), axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+```
+
+## Normalise data
+
+```{r}
+
+## Normalise by blank samples
+long <- long %>%
+  group_by(PBS, Timepoint) %>%
+  mutate(
+    Blank = mean(`Fluorescence (RFU)`[Condition == "Blank"], na.rm = TRUE),
+    `Blank Normalised Fluorescence (AU)` = `Fluorescence (RFU)` / Blank
+  ) %>%
+  ungroup()
+
+## Normalise by timepoint = 0
+long <- long %>%
+  group_by(PBS, Condition, Replicate) %>%
+  mutate(
+    Time0 = `Blank Normalised Fluorescence (AU)`[[1]],
+    `Normalised Fluorescence (AU)` = `Blank Normalised Fluorescence (AU)` / Time0
+  ) %>%
+  ungroup()
+
+  
+```
+
+## Statistics
+
+```{r}
+
+dat <- long
+renamed_dat <- dat %>%
+  rename(Fluorescence = `Normalised Fluorescence (AU)`)
+
+model <- lm(`Normalised Fluorescence (AU)` ~ Condition, data = dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`Normalised Fluorescence (AU)`",
+         facet.by = "Condition",
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+renamed_dat %>%
+  group_by(Condition) %>%
+  shapiro_test(Fluorescence)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`Normalised Fluorescence (AU)` ~ Condition)
+dat_summary <- dat %>%
+  group_by(Condition) %>%
+  get_summary_stats(`Normalised Fluorescence (AU)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 2, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_normalised <- emmeans(model, ~ Condition, vcov. = vcovHC3)
+pairs(emm_normalised, adjust = "bonferroni")
+stat_normalised <- summary(pairs(emm_normalised, adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_normalised_pos <- stat_normalised %>%
+  add_xy_position(
+    x = "Condition",
+    data = dat,
+    formula = `Normalised Fluorescence (AU)` ~ Condition,
+  ) %>%
+  mutate(
+    xmin = match(group1, levels(droplevels(dat$Condition))),
+    xmax = match(group2, levels(droplevels(dat$Condition))),
+  )
+```
+
+## Visualise Normalised data
+
+```{r, fig.height=4, fig.width=8}
+dat <- long
+
+ggplot(data = dat, aes(x = Timepoint, y = `Normalised Fluorescence (AU)`, color = Condition, group = interaction(Replicate, Condition))) +
+  scale_y_continuous(trans = "log2") +
+  geom_line(aes(linewidth = (Condition == "Blank" | Condition == "Control"))) +
+  scale_linewidth_manual(
+    values = c("TRUE" = 1.5, "FALSE" = 0.5),
+    guide = "none"
+  ) +
+  facet_wrap(~ reorder(PBS, desc(PBS))) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713)
+```

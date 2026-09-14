@@ -1,0 +1,318 @@
+---
+title: "01_Validation"
+author: "Joris Van Meenen"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+## Load modules
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggprism)
+library(ggforce)
+library(zoo)
+library(rstatix)
+library(ggpubr)
+library(stringr)
+
+set.seed(42)
+```
+
+## Data to long
+
+```{r}
+
+stx2control <- c(12, 999)
+stx2noglasst1 <- c(200, 203, 202, 209, 218, 217, 207, 204, 208, 210)
+stx2noglasst2 <- c(212, 205, 198, 205, 219, 221, 201, 221, 207, 217)
+stx2noglasst3 <- c(204, 207, 202, 205, 222, 208, 200, 214, 206, 215)
+stx2noglass <- (stx2noglasst1 + stx2noglasst2 + stx2noglasst3)/3
+stx2glasst1 <- c(350, 363, 374, 364, 391, 345, 326, 396, 357, 398)
+stx2glasst2 <- c(334, 358, 373, 359, 388, 350, 329, 387, 339, 377)
+stx2glasst3 <- c(328, 365, 363, 367, 383, 345, 330, 387, 370, 373)
+stx2glass <- (stx2glasst1 + stx2glasst2 + stx2glasst3)/3
+stx4control <- c(49)
+stx4noglass <- c(254, 250, 247, 249, 260, 258, 246, 261, 248, 256)
+stx4glass <- c(352, 368, 368, 361, 370, 375, 353, 409, 382, 380)
+
+resistance <- c(stx2control, stx2noglass, stx2glass, stx4control, stx4noglass, stx4glass)
+device <- rep("EVOM2", length(resistance))
+electrode <- c(rep("STX2", 22), rep("STX4", 21))
+sample <- c("Measurement medium", "Calibration resistor", rep("No glass", 10), rep("Glass", 10), "Measurement medium", rep("No glass", 10), rep("Glass", 10))
+replicate <- c(1, 1, rep(1:10, times = 2), 1, rep(1:10, times = 2))
+
+long <- data.frame(
+  "Resistance (Ω)" = resistance, 
+  "Device" = device,
+  "Electrode" = electrode,
+  "Sample" = sample,
+  "Replicate" = replicate,
+  check.names = FALSE
+)
+
+dir = "D://Documents//Work//Data//Cornea-on-chip//Epithelial barrier//01_Validation//EVOM3//Data//"
+
+## Load and concatenate csv files
+csvList = list.files(path = dir, pattern = "*.CSV", full.names = TRUE)
+
+for (csv in csvList) {
+  ## Extract resistance values
+  df <- read.csv(
+    file.path(csv),
+    skip = 7,
+    header = TRUE,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+  df <- df[1:8,2:13]
+  resistance <- as.vector(t(df))
+  resistance <- resistance[resistance > 0]
+  df <- data.frame("Resistance (Ω)" = resistance, check.names = FALSE)
+  df["Device"] <- rep("EVOM3", length(resistance))
+  df["Electrode"] <- rep("STX4", length(resistance))
+  
+  ## Filter out calibration measurements
+  df <- df %>% 
+    mutate(
+      Sample = case_when(
+        (`Resistance (Ω)` >= 995 & `Resistance (Ω)` <= 1005) ~ "Calibration resistor",
+        (`Resistance (Ω)` >= 30 & `Resistance (Ω)` <= 100) ~ "Measurement medium",
+        TRUE ~ "TBD"
+      )
+    )
+  
+  ## Add plate, row, column and replicate variables
+  name <- basename(csv)
+  
+  if (str_detect(name, "plate")) {
+    
+    df[df$Sample == "TBD", "Replicate"] <- rep(1:10, each = 3)
+    df[df$Sample == "TBD", "t"] <- rep(c(1, 2, 3), times = 10)
+    
+    
+    if (str_detect(name, "noplate")) {
+      
+      df[df$Sample == "TBD", "Sample"] <- rep("No holder", 30)
+      
+    } else {
+      
+      df[df$Sample == "TBD", "Sample"] <- rep("Holder", 30)
+      
+    }
+  }
+  
+  if (str_detect(name, "glass")) {
+    
+     df[df$Sample == "TBD", "Replicate"] <- 1:10
+    
+    if (str_detect(name, "noglass")) {
+      
+      df[df$Sample == "TBD", "Sample"] <- rep("No glass", 10)
+      
+    } else {
+      
+      df[df$Sample == "TBD", "Sample"] <- rep("Glass", 10)
+      
+    }
+  }
+  
+  ## Merge all csv files
+  long <- dplyr::bind_rows(long, df)
+}
+long["Condition"] <- str_c(long$Device, long$Electrode, sep = " ")
+long$Sample <- factor(long$Sample, levels = c("Measurement medium", "Calibration resistor", "No glass", "Glass", "No holder", "Holder"))
+long$Replicate <- factor(long$Replicate)
+long
+
+
+
+```
+
+# Validation of insert/electrode holder
+
+## Metrics: CV calculation
+
+```{r}
+dat <- long[!is.na(long$t),]
+cv <- dat %>%
+  group_by(Sample, Replicate) %>%
+  reframe(
+    `CV (%)` = sd(`Resistance (Ω)`)/mean(`Resistance (Ω)`) * 100
+  )
+```
+
+## Statistics
+
+```{r}
+dat <- droplevels(cv)
+
+renamed_dat <- dat %>%
+  rename(CV = `CV (%)`)
+
+model <- lm(CV ~ `Sample`, data = renamed_dat)
+
+renamed_dat %>%
+  group_by(`Sample`) %>%
+  shapiro_test(CV) %>%
+  ungroup()
+
+ggqqplot(renamed_dat, x = "CV", facet.by = "Sample")
+
+plot(model, 1)
+renamed_dat %>% levene_test(CV ~ Sample)
+
+stat_cv_pos <- dat %>%
+  wilcox_test(`CV (%)` ~ Sample) %>%
+  add_significance() %>%
+  add_xy_position(x = "Sample") %>%
+  mutate(y.position = 5)
+```
+
+## Visualisation
+
+```{r}
+
+dat <- long[!is.na(long$t),]
+x <- dat$Replicate
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Sample, group = interaction(`Sample`,  Replicate))) + 
+  geom_violin(width = 0.5, scale = "width", position = position_dodge(width = 0.8), alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 4, maxwidth = 0.5, position = position_dodge(width = 0.8), scale = FALSE, alpha = 0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "median", size = 0.5, position = position_dodge(width = 0.8), shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_cl_boot", fun.args = list(conf.int = 0.95), width = 0.2, position = position_dodge(width = 0.8), colour = "black", linewidth = 1) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(210, 310), expand = c(0, 0)) +
+  theme_prism(base_size = 28) +
+  theme(axis.title.x = element_blank())
+
+dat <- cv
+x <- dat$`Sample`
+y <- dat$`CV (%)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Sample)) + 
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 6, maxwidth = 0.5, scale = FALSE, alpha =
+    0.4, stroke = 0) +
+  coord_cartesian(clip = "off") +
+  stat_summary(geom = "point", fun = "median", size = 2, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_cl_boot", fun.args = list(conf.int = 0.95), width = 0.2, colour = "black", linewidth = 1) +
+  stat_pvalue_manual(
+    stat_cv_pos,
+    tip.length = 0.05,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(-0.5, 5), expand = c(0, 0)) +
+  theme_prism(base_size = 28) +
+  theme(axis.title.x = element_blank())
+```
+
+# Validation of TEER absolute values
+
+## Calculation and statistics
+
+```{r}
+
+setup <- long[is.na(long$t) & long$Sample != "Calibration resistor" & long$Sample != "Measurement medium",] %>%
+  group_by(Device, Electrode) %>%
+  mutate(
+    `TEER (Ω*cm²)` = (`Resistance (Ω)` - mean(`Resistance (Ω)`[Sample == "No glass"])) * 0.3359273609
+  ) %>%
+  filter(Sample != "No glass") %>%
+  ungroup()
+
+model <- lm(`TEER (Ω*cm²)` ~ Condition, data = setup)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = setup,
+         x = "`TEER (Ω*cm²)`",
+         facet.by = "Condition",
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+setup %>%
+  rename(TEER = `TEER (Ω*cm²)`) %>%
+  group_by(Condition) %>%
+  shapiro_test(TEER)
+
+## Homogeneity of variances
+plot(model, 1)
+setup %>% 
+  levene_test(`TEER (Ω*cm²)` ~ Condition)
+
+## Data is not considered repeated measures because different setups are used
+anova_results <- Anova(model)
+print(anova_results)
+
+## Pairwise comparisons, bonferroni is preferred in this case of low sample size due to strictness without compromising power
+#setup %>%
+  #tukey_hsd(`TEER (Ω*cm²)` ~ Condition)
+
+pairwise_setup <- setup %>%
+  t_test(`TEER (Ω*cm²)` ~ Condition,
+         p.adjust.method = "bonferroni"
+  ) %>%
+  add_xy_position(x = "Condition") %>%
+  mutate(
+    y.position = c(70, 80, 90)
+  )
+
+```
+
+### Visualisation
+
+```{r}
+
+dat <- long[is.na(long$t) & long$Sample != "Calibration resistor" & long$Sample != "Measurement medium",]
+x <- reorder(dat$`Sample`, desc(dat$`Sample`))
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition, group = interaction(`Sample`, Condition))) + 
+  geom_violin(width = 0.5, scale = "width", position = position_dodge(width = 0.8), alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 4, maxwidth = 0.5, position = position_dodge(width = 0.8), scale = FALSE, alpha = 0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, position = position_dodge(width = 0.8), shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, position = position_dodge(width = 0.8), colour = "black", linewidth = 1) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(0, 450), expand = c(0, 0), oob = scales::oob_keep, guide = guide_prism_minor(), minor_breaks = seq(0, 450, 50)) +
+  theme_prism(base_size = 28) +
+  theme()
+
+dat <- setup
+x <- dat$Condition
+y <- dat$`TEER (Ω*cm²)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 6, maxwidth = 0.5, scale = FALSE, alpha =
+    0.4, stroke = 0) +
+  coord_cartesian(clip = "off") +
+  stat_summary(geom = "point", fun = "mean", size = 2, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  stat_pvalue_manual(
+    pairwise_setup,
+    label = "p.adj.signif",
+    tip.length = 0.05,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  scale_x_discrete(breaks=c(NA, "EVOM2 STX4", NA),
+        labels=c(NA, "Glass", NA)) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(0, 100), expand = c(0, 0)) +
+  theme_prism(base_size = 28) +
+  theme(axis.title.x = element_blank())
+
+```

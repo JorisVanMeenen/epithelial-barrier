@@ -1,0 +1,255 @@
+---
+title: "08_Supplements-PrestoBlue"
+author: "Joris Van Meenen"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+## Load modules
+
+```{r}
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+library(ggprism)
+library(ggforce)
+library(rstatix)
+library(emmeans)
+library(tidyr)
+library(scales)
+library(ggstatsplot)
+library(sandwich)
+#library(nlme)
+
+set.seed(42)
+```
+
+## Load data
+
+```{r}
+long <- data.frame()
+startDate <- as.Date("20251103", format="%Y%m%d")
+dir = "D://Documents//Work//Data//Cornea-on-chip//Epithelial barrier//08_Supplements//Tecan//PrestoBlue//"
+
+xlsxList <- list.files(path = dir, pattern = "*.xlsx", full.names = TRUE, ignore.case = TRUE)
+
+for (xlsx in xlsxList) {
+  raw <- read_xlsx(xlsx, col_names = FALSE)
+  skip <- which(raw[[1]] == "<>")[1] - 1
+  df <- read_xlsx(
+    file.path(xlsx),
+    skip = skip
+  )
+  df <- df[1:8,2:13]
+  fluorescence <- as.vector(t(df))
+  fluorescence <- fluorescence[!is.na(fluorescence) > 0]
+  fluorescence<- as.numeric(fluorescence)
+
+  
+  condition <- c(
+      rep(c("HCE-T", "Calcium"), times = 4),
+      rep(c("Control"), 2),
+      rep(c("Reservoir"), 2),
+      rep(c("GSK", "SP"), times = 4),
+      "Control",
+      rep(c("SP+IGF1", "IGF1"), times = 4),
+      "Control",
+      rep(c("Reservoir"), 2),
+      rep(c("HCE-T", "Calcium"), times = 4),
+      "Control",
+      rep(c("GSK", "SP"), times = 4),
+      "Control",
+      rep(c("Reservoir"), 2),
+      rep(c("SP+IGF1", "IGF1"), times = 4),
+      "Control",
+      c("HCE-T", "SP+IGF1", "Calcium", "IGF1", "GSK", "SP"),
+      "Control",
+      rep(c("Reservoir"), 2),
+      c("HCE-T", "SP+IGF1", "Calcium", "IGF1", "GSK", "SP"),
+      "Control"
+    )
+  
+  df <- data.frame(
+    "Condition" = condition,
+    "Fluorescence (RFU)" = fluorescence, 
+    check.names = FALSE
+  )
+  
+  ## Add date and day variables
+  name <- basename(xlsx)
+  date <- as.Date(strsplit(name, "_")[[1]][3], format="%Y%m%d")
+  dateDiff <- as.double(date - startDate)
+  df["Date"] <- rep(date, nrow(df))
+  df["Days after seeding"] <- rep(dateDiff, nrow(df))
+
+  long <- dplyr::bind_rows(long, df)
+}
+
+## Set to factor to enable statistics bracket placement
+long$Condition <- factor(long$Condition, levels = c("HCE-T", "Calcium", "GSK", "SP", "SP+IGF1", "IGF1", "Control", "Reservoir"))
+
+long <- long %>%
+  mutate(Group = case_when(
+    Condition %in% c("Hydrogel control", "Control", "Reservoir") ~ "No cells",
+    TRUE ~ "Cells"
+  ))
+```
+
+## Visualisation
+
+```{r, fig.width=12, fig.width=12}
+dat <- long
+x <- dat$`Days after seeding`
+y <- dat$`Fluorescence (RFU)`
+
+control_conditions <- c("Reservoir", "Control")
+interesting_conditions <- setdiff(unique(dat$Condition), control_conditions)
+dat_background <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_facet = Condition) %>%
+  crossing(Condition_display = interesting_conditions) %>%
+  filter(Condition_facet != Condition_display)
+dat_interesting <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_display = Condition)
+dat_control <- dat %>%
+  filter(Condition %in% control_conditions) %>%
+  crossing(Condition_display = interesting_conditions)
+ggplot(data = dat, aes(x = `Days after seeding`, y = `Fluorescence (RFU)`)) + 
+  geom_line(data = dat_control,
+            aes(color = Condition, 
+            group = interaction(Condition, Replicate))
+            ) +
+  geom_point(data = dat_control,
+            aes(color = Condition, 
+            group = interaction(Condition, Replicate)), size = 2
+            ) +
+  geom_line(data = dat_background,
+            aes(group = interaction(Condition_facet, Replicate)),
+            color = "grey") +
+  geom_point(data = dat_background,
+            aes(group = interaction(Condition_facet, Replicate)),
+            color = "grey", size = 2) +
+  geom_line(data = dat_interesting,
+            aes(color = Condition, 
+            group = interaction(Condition, Replicate))
+            ) +
+  geom_point(data = dat_interesting,
+            aes(color = Condition, 
+            group = interaction(Condition, Replicate)), size = 2
+            ) +
+  scale_y_continuous(limits = c(0, 55000), expand = c(0, 0)) +
+  scale_x_continuous(limits = c(0, 14), expand = c(0, 0), guide = guide_prism_minor(), minor_breaks = seq(0, 14, 1)) +
+  facet_wrap(~ factor(Condition_display, levels = c("25%", "50%", "100%", "Serial", "Bulk"))) +
+  scale_color_manual(
+  breaks = c("25%", "50%", "100%", "Serial", "Bulk", "Control", "Reservoir"),
+    values = c("25%" = "#F8766D", "50%" = "#DB8E00", "100%" = "#AEA200", "Serial" = "#64B200", "Bulk" = "#00BD5C", "Control" = "#00C1A7", "Reservoir" = "#00BADE")) +
+    theme_prism(base_size = 22, base_line_size = 1.2) +
+    theme(panel.spacing.x = unit(1.5, "lines"), legend.key.spacing.y = unit(0.5, "lines"))
+```
+
+# Final day
+
+## Normalisation
+
+```{r}
+normalised <- long %>%
+  mutate( 
+    `Normalised Fluorescence (AU)` = `Fluorescence (RFU)` / mean(`Fluorescence (RFU)`[Group == "No cells"]),
+  ) %>%
+  filter(Group != "No cells")
+```
+
+## Statistics
+
+```{r}
+dat <- normalised
+renamed_dat <- dat %>%
+  rename(Fluorescence = `Fluorescence (RFU)`)
+
+model <- lm(`Normalised Fluorescence (AU)` ~ Condition, data = dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`Normalised Fluorescence (AU)`",
+         facet.by = "Condition",
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+renamed_dat %>%
+  group_by(Condition) %>%
+  shapiro_test(Fluorescence)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`Normalised Fluorescence (AU)` ~ Condition)
+dat_summary <- dat %>%
+  group_by(Condition) %>%
+  get_summary_stats(`Fluorescence (RFU)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 2, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_cell <- emmeans(model, ~ Condition, vcov. = vcovHC3)
+pairs(emm_cell, adjust = "bonferroni")
+stat_cell <- summary(pairs(emm_cell, adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_cell_pos <- stat_cell %>%
+  add_xy_position(
+    x = "Condition",
+    data = dat,
+    formula = `Normalised Fluorescence (AU)` ~ Condition,
+  ) %>%
+  mutate(y.position = 17.15 + (row_number() * 0.85)) %>%
+  mutate(
+    xmin = match(group1, levels(droplevels(dat$Condition))),
+    xmax = match(group2, levels(droplevels(dat$Condition))),
+  )
+```
+
+## Visualisation
+
+```{r}
+dat <- normalised
+x <- dat$Condition
+y <- dat$`Normalised Fluorescence (AU)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 6, maxwidth = 0.5, scale = FALSE, alpha =
+    0.4, stroke = 0) +
+  coord_cartesian(clip = "off") +
+  stat_summary(geom = "point", fun = "mean", size = 2, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(0, 30.5), expand = c(0, 0), oob = oob_keep, guide = guide_prism_minor()) +
+  stat_pvalue_manual(
+    stat_cell_pos,
+    label = "p.adj.signif",
+    tip.length = 0,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  geom_hline(yintercept = 1, linetype="dashed") +
+  scale_color_manual(
+    breaks = c("HCE-T", "Calcium", "GSK", "SP", "SP+IGF1", "IGF1", "Control", "Calibration resistor", "Measurement medium"),
+    values = c("HCE-T" = "#F8766D", "Calcium" = "#DB8E00", "GSK" = "#AEA200", "SP" = "#64B200", "SP+IGF1" = "#00BD5C", "IGF1" = "#00C1A7", "Control" = "#00BADE", "Calibration resistor" = "#00A6FF", "Measurement medium" = "#B385FF")) +
+  theme_prism(base_size = 28) +
+  theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+```

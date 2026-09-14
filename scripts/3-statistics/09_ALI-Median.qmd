@@ -1,0 +1,166 @@
+---
+title: "09_ALI-Median"
+author: "Joris Van Meenen"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+## Load modules
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggprism)
+library(ggforce)
+library(tidyr)
+library(scales)
+library(rstatix)
+library(ggpubr)
+library(emmeans)
+library(sandwich)
+library(zoo)
+library(stringr)
+
+set.seed(42)
+```
+
+## Data to long
+
+```{r}
+## Initialise variables
+long <- data.frame()
+path = "D://Documents//Work//Data//Cornea-on-chip//Epithelial barrier//09_ALI//Axio//Calcein//Results of median.csv"
+
+df <- read.csv(
+  file.path(path),
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+  
+condition <- c(rep(c("HCE-T", "Hydrogel control", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry"), times = 10), rep(c("Control", "Shear stress", "Shear stress", "Control"), each = 5))
+replicate <- c(rep(1:10, each = 6), rep(1:5, times = 2), rep(6:10, times = 2))
+
+df$Condition <- condition
+df$Replicate <- replicate
+
+long <- df
+```
+
+## Filter outliers
+
+Filtered based on visual inspection of brightfield images –\> dislodged hydrogels
+
+```{r}
+
+long <- long %>%
+  filter(!(Condition == "Hydrogel HCE-T" & (Replicate == 6 | Replicate == 9)))
+```
+
+## Statistics
+
+```{r}
+
+dat <- long[long$Condition == "HCE-T" | long$Condition == "Tears",]
+
+model <- lm(Median ~ Condition, data = dat)
+
+dat %>%
+  group_by(Condition) %>%
+  shapiro_test(Median)
+
+ggqqplot(dat, x = "Median", facet.by = "Condition")
+
+plot(model, 1)
+dat %>% levene_test(Median ~ Condition)
+
+stat_median_pos <- dat %>%
+  t_test(Median ~ Condition, var.equal = TRUE) %>%
+  add_significance() %>%
+  add_xy_position(x = "Condition")
+
+```
+
+## Median fluorescence
+
+```{r}
+dat <- long[long$Condition == "HCE-T" | long$Condition == "Tears",]
+x <- dat$Condition
+y <- dat$Median
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 6, maxwidth = 0.5, scale = FALSE, alpha =
+    0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  ylab("Median fluorescence (RFU)") +
+  #scale_y_continuous(limits = c(0, 800), expand = c(0, 0), oob = oob_keep, guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  stat_pvalue_manual(
+    stat_median_pos,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  scale_color_manual(
+    breaks = c("HCE-T", "Hydrogel control", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry", "Shear stress", "Control", "Calibration resistor", "Measurement medium", "Artificial tears"),
+    values = c("HCE-T" = "#F8766D", "Hydrogel control" = "#DB8E00", "Hydrogel HCE-T" = "#AEA200", "Tears" = "#64B200", "ALI hydrated" = "#00BD5C", "ALI dry" = "#00C1A7", "Shear stress" = "#00BADE", "Control" = "#00A6FF", "Calibration resistor" = "#B385FF", "Measurement medium" = "#EF67EB", "Artificial tears" = "#FF63B6")) +
+  theme_prism(base_size = 28) +
+  theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"), axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+```
+
+## Statistics
+
+```{r}
+
+dat <- long[long$Condition == "Hydrogel HCE-T" | long$Condition == "Hydrogel control",]
+
+model <- lm(Median ~ Condition, data = dat)
+
+dat %>%
+  group_by(Condition) %>%
+  shapiro_test(Median)
+
+ggqqplot(dat, x = "Median", facet.by = "Condition")
+
+plot(model, 1)
+dat %>% levene_test(Median ~ Condition)
+
+stat_median_pos <- dat %>%
+  t_test(Median ~ Condition, var.equal = TRUE) %>%
+  add_significance() %>%
+  add_xy_position(x = "Condition")
+
+```
+
+## Median fluorescence
+
+```{r}
+dat <- long[long$Condition == "Hydrogel HCE-T" | long$Condition == "Hydrogel control",]
+x <- dat$Condition
+y <- dat$Median
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 6, maxwidth = 0.5, scale = FALSE, alpha =
+    0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  ylab("Median fluorescence (RFU)") +
+  #scale_y_continuous(limits = c(0, 800), expand = c(0, 0), oob = oob_keep, guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  stat_pvalue_manual(
+    stat_median_pos,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  scale_color_manual(
+    breaks = c("HCE-T", "Hydrogel control", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry", "Shear stress", "Control", "Calibration resistor", "Measurement medium", "Artificial tears"),
+    values = c("HCE-T" = "#F8766D", "Hydrogel control" = "#DB8E00", "Hydrogel HCE-T" = "#AEA200", "Tears" = "#64B200", "ALI hydrated" = "#00BD5C", "ALI dry" = "#00C1A7", "Shear stress" = "#00BADE", "Control" = "#00A6FF", "Calibration resistor" = "#B385FF", "Measurement medium" = "#EF67EB", "Artificial tears" = "#FF63B6")) +
+  theme_prism(base_size = 28) +
+  theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"), axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+```

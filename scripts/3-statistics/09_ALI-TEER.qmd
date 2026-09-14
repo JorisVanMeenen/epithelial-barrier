@@ -1,0 +1,1268 @@
+---
+title: "09_ALI-TEER"
+author: "Joris Van Meenen"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+## Load modules
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggprism)
+library(ggforce)
+library(tidyr)
+library(scales)
+library(rstatix)
+library(ggpubr)
+library(emmeans)
+library(sandwich)
+library(zoo)
+library(stringr)
+
+set.seed(42)
+```
+
+## Platemap
+
+```{r}
+
+
+
+plate <- c(rep(1:2, each = 24), rep(3, 12), rep(4, 20))
+row <- c(rep(1:4, each = 6, times = 2), rep(2:3, each = 6), rep(1:4, each = 5))
+column <- c(rep(1:6, times = 10), rep(1:5, times = 4))
+condition <- c(rep(c("HCE-T", "Hydrogel control", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry"), times = 10), rep("Control", 5), rep("Shear stress", 10), rep("Control", 5))
+
+df <- data.frame(Plate = plate, Row = row, Column = column, Condition = condition)
+
+
+dat <- df
+dat$Plate <- paste0("Plate ", as.character(dat$Plate))
+x <- dat$Column
+y <- dat$Row
+
+ggplot(data = dat, aes(x = factor(Column), y = reorder(Row, desc(Row)), color = factor(Condition, levels = c("HCE-T", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry", "Shear stress", "Control", "Hydrogel control")))) + 
+  geom_point(shape = 16, size = 28) +
+  #scale_fill_continuous(limits = c(min(dat$`Resistance (Ω)`[dat$`Resistance (Ω)` > 300]), max(z$`Resistance (Ω)`))) +
+  xlab(names(which(sapply(dat, identical, y = x)))) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_color_manual(
+    breaks = c("HCE-T", "Hydrogel control", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry", "Shear stress", "Control", "Calibration resistor", "Measurement medium", "Artificial tears"),
+    values = c("HCE-T" = "#F8766D", "Hydrogel control" = "#DB8E00", "Hydrogel HCE-T" = "#AEA200", "Tears" = "#64B200", "ALI hydrated" = "#00BD5C", "ALI dry" = "#00C1A7", "Shear stress" = "#00BADE", "Control" = "#00A6FF", "Calibration resistor" = "#B385FF", "Measurement medium" = "#EF67EB", "Artificial tears" = "#FF63B6")) +
+  facet_wrap(~ Plate) +
+  theme_prism(base_size = 28) +
+  theme(
+    axis.line = element_blank(),
+    axis.ticks = element_blank(),
+    legend.key.spacing.y = unit(-1, "lines")
+  )
+```
+
+## Data to long
+
+```{r}
+## Initialise variables
+long <- data.frame()
+startDate <- as.Date("20260204", format="%Y%m%d")
+dir = "D://Documents//Work//Data//Cornea-on-chip//Epithelial barrier//09_ALI//EVOM3//"
+
+## Load and concatenate csv files
+csvList = list.files(path = dir, pattern = "*.CSV", full.names = TRUE)
+
+for (csv in csvList) {
+  ## Extract resistance values
+  df <- read.csv(
+    file.path(csv),
+    skip = 7,
+    header = TRUE,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+  df <- df[1:8,2:13]
+  resistance <- as.vector(t(df))
+  resistance <- resistance[resistance > 0]
+  df <- data.frame("Resistance (Ω)" = resistance, check.names = FALSE)
+  ## Filter out calibration measurements
+  df <- df %>% 
+    mutate(
+      Condition = case_when(
+        (row_number() == 1 & `Resistance (Ω)` >= 995 & `Resistance (Ω)` <= 1005) ~ "Calibration resistor",
+        (`Resistance (Ω)` >= 30 & `Resistance (Ω)` <= 50) ~ "Measurement medium",
+        (row_number() == length(resistance) & `Resistance (Ω)` >= 90 & `Resistance (Ω)` <= 110) ~ "Artificial tears",
+        TRUE ~ "TBD"
+      ),
+      ## Each medium measurement designates a separate set of measurements
+      Measurement = cumsum(Condition == "Measurement medium")
+    )
+  
+  ## Add date and day variables
+  name <- basename(csv)
+  date <- as.Date(strsplit(name, "_")[[1]][2], format="%Y%m%d")
+  dateDiff <- as.double(date - startDate)
+  df["Date"] <- rep(date, nrow(df))
+  df["Days after seeding"] <- rep(dateDiff, nrow(df))
+  index <- as.integer(substr(csv, nchar(csv) - 4, nchar(csv)-4))
+  
+  ## Plate layouts
+  plate <- c(rep(c(1, 2), each = 4), rep(3, 2), rep(c(rep(1, 5), 4), times = 4), rep(c(rep(2, 5), 4), times = 4), rep(c(rep(3, 5), 4), times = 2))
+  row <- c(1:4, 1:4, 2:3, c(rep(1, 5), 2, rep(2, 6), rep(3, 5), 2, rep(4, 5), 2, rep(1, 5), 2, rep(2, 5), 3, rep(3, 6), rep(4, 5), 3, rep(2, 5), 3, rep(3, 6)))
+  column <- c(rep(2, 10),  rep(c(1, 3:6, 1, 1, 3:6, 2, 1, 3:6, 3, 1, 3:6, 4, 1, 3:6, 5), times = 2))
+  replicate <- c(1:10, rep(c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), each = 6))
+  condition <- c(rep("Hydrogel control", 10), rep(c("HCE-T", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry", "Shear stress"), times = 10))
+
+  ## Endpoint (20/02/2026 - 23/02/2026)
+  if (df[1, "Date"] >= as.Date("2026-02-20")) {
+    
+    df[df$Condition == "TBD", "Plate"] <- c(rep(4, 10), plate)
+    df[df$Condition == "TBD", "Row"] <- c(rep(1, 5), rep(4, 5), row)
+    df[df$Condition == "TBD", "Column"] <- c(rep(1:5, times = 2), column)
+    df[df$Condition == "TBD", "Replicate"] <- c(1:10, replicate)
+    df["Time (min)"] <- rep(c(20, 145, 40)[index], length(resistance))
+    df[df$Condition == "TBD", "Condition"] <- c(rep("Control", 10), condition)
+    
+  } else {
+    
+    ### During conditions (16/02/2026 - 18/02/2026) --FIRST-- Before vs after medium change
+    if ((df[1, "Date"] >= as.Date("2026-02-16")) & (index == 1) & (df[1, "Date"] < as.Date("2026-02-20"))) {
+      
+      df[df$Condition == "TBD", "Plate"] <- c(rep(1, 4), rep(c(rep(1, 3), 4), times = 4), plate)
+      df[df$Condition == "TBD", "Row"] <- c(1:4, rep(1, 3), 1, rep(2, 3), 1, rep(3, 3), 1, rep(4, 3), 1, row)
+      df[df$Condition == "TBD", "Column"] <- c(rep(2, 4), 1, 3, 4, 1, 1, 3, 4, 2, 1, 3, 4, 3, 1, 3, 4, 4, column)
+      df[df$Condition == "TBD", "Replicate"] <- c(1:4, rep(1:4, each = 4), replicate)
+      df["Time (min)"] <- c(20, rep(0, 21), rep(20, 71))
+      df[df$Condition == "TBD", "Condition"] <- c(rep("Hydrogel control", 4), rep(c("HCE-T", "Hydrogel HCE-T", "Tears", "Shear stress"), times = 4), condition)
+      
+    } else {
+      
+        df[df$Condition == "TBD", "Plate"] <- plate
+        df[df$Condition == "TBD", "Row"] <- row
+        df[df$Condition == "TBD", "Column"] <- column
+        df[df$Condition == "TBD", "Replicate"] <- replicate
+        df["Time (min)"] <- rep(c(20, 40, 60, 80)[index], length(resistance))
+        df[df$Condition == "TBD", "Condition"] <- condition
+      
+    }
+    
+  }
+  
+  df[is.na(df$Replicate), "Replicate"] <- 1
+  
+
+  ## Merge all csv files
+  long <- dplyr::bind_rows(long, df)
+}
+
+## Set time of Artificial tears measurement to 20, for easier downstream processing (the same is done for the Calibration resistor for the same reason, which was actually measured at time 0)
+long[long$Condition == "Artificial tears", "Time (min)"] <- rep(20, length(long[long$Condition == "Artificial tears", "Time (min)"]))
+
+## Set to factor to enable statistics bracket placement
+long$Condition <- factor(long$Condition, levels = c("HCE-T", "Hydrogel control", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry", "Shear stress", "Control", "Calibration resistor", "Measurement medium", "Artificial tears"))
+
+long <- long %>%
+  mutate(Group = case_when(
+    Condition %in% c("Hydrogel control", "Control", "Calibration resistor", "Measurement medium", "Artificial tears") ~ "No cells",
+    TRUE ~ "Cells"
+  ))
+
+
+long
+```
+
+## Filter outliers
+
+Filtered based on visual inspection of brightfield images –\> dislodged hydrogels
+
+```{r}
+
+long <- long %>%
+  filter(!(Condition == "Hydrogel HCE-T" & (Replicate == 6 | Replicate == 9)))
+```
+
+# Resistance
+
+## Visualise data across days
+
+```{r}
+dat <- long[long$`Time (min)` == 20,]
+
+control_conditions <- c("Calibration resistor", "Measurement medium", "Artificial tears", "Control")
+interesting_conditions <- setdiff(unique(dat$Condition), control_conditions)
+dat_background <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_facet = Condition) %>%
+  crossing(Condition_display = interesting_conditions) %>%
+  filter(Condition_facet != Condition_display)
+dat_interesting <- dat %>%
+  filter(Condition %in% interesting_conditions) %>%
+  mutate(Condition_display = Condition)
+dat_control <- dat %>%
+  filter(Condition %in% control_conditions) %>%
+  crossing(Condition_display = interesting_conditions)
+dat_interesting <- rbind(dat_interesting, dat_control)
+
+ggplot(data = dat, aes(x = `Days after seeding`, y = `Resistance (Ω)`, color = Condition)) + 
+  geom_line(data = dat_background, aes(group = interaction(Condition_facet, Replicate)), color = "grey") +
+  geom_point(data = dat_background, aes(group = interaction(Condition_facet, Replicate)), color = "grey", size = 2) +
+  geom_line(data = dat_interesting, aes(group = interaction(Condition, Replicate))) +
+  geom_point(data = dat_interesting, aes(group = interaction(Condition, Replicate)), size = 2) +
+  geom_hline(yintercept = 0, linetype="dashed") +
+  #geom_vline(xintercept = 9, linetype="dashed") +
+  #annotate("text", x=9, y=3250, label="Start", vjust = -0.5, angle = 90) +
+  geom_vline(xintercept = 16, linetype="dashed") +
+  annotate("text", x = 16, y = 3250, label = "Diffusion", vjust = -0.5, angle = 90) +
+  geom_vline(xintercept = 19, linetype="dashed") +
+  annotate("text", x = 19, y = 3250, label = "Viability", vjust = -0.5, angle = 90) +
+  scale_y_continuous(limits = c(-500, 4000), expand = c(0, 0), oob = scales::oob_keep, guide = guide_prism_minor()) +
+  scale_x_continuous(limits = c(0, 20), expand = c(0, 0), guide = guide_prism_minor(), minor_breaks = seq(0, 20, 1)) +
+  scale_color_manual(
+    breaks = c("HCE-T", "Hydrogel control", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry", "Shear stress", "Control", "Calibration resistor", "Measurement medium", "Artificial tears"),
+    values = c("HCE-T" = "#F8766D", "Hydrogel control" = "#DB8E00", "Hydrogel HCE-T" = "#AEA200", "Tears" = "#64B200", "ALI hydrated" = "#00BD5C", "ALI dry" = "#00C1A7", "Shear stress" = "#00BADE", "Control" = "#00A6FF", "Calibration resistor" = "#B385FF", "Measurement medium" = "#EF67EB", "Artificial tears" = "#FF63B6")) +
+  facet_wrap(~ factor(Condition_display, levels = c("HCE-T", "Hydrogel control", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry", "Shear stress")), scales = "free") +
+  theme_prism(base_size = 22, base_line_size = 1.2) +
+  theme(panel.spacing.x = unit(1.5, "lines"), legend.key.spacing.y = unit(0.5, "lines"))
+
+ 
+
+```
+
+## Metrics: CV
+
+Plateau period is from Day 9 to day 14 with a new plateau period starting at day 21.
+
+```{r}
+dat <- long[!is.na(long$Plate) & long$`Time (min)` == 20,]
+cv <- dat %>%
+  filter(!is.na(Plate)) %>%
+  group_by(Condition, Replicate) %>%
+  arrange(`Days after seeding`) %>%
+  mutate(CV = rollapply(
+    data = `Resistance (Ω)`,
+    width = 3,
+    FUN = function(x) {
+      sd(x)/mean(x) * 100
+    },
+    align = "right",
+    fill = NA
+  )) %>%
+  ungroup() %>% 
+  mutate(`CV <= 15%` = case_when(
+    CV <= 15 ~ TRUE,
+    CV > 15 ~ FALSE,
+    TRUE ~ NA
+  ))
+```
+
+## Visualisation: CV
+
+```{r}
+dat <- cv[cv$Condition != "Control",]
+x <- factor(dat$Replicate)
+y <- reorder(dat$`Days after seeding`, desc(dat$`Days after seeding`))
+
+ggplot(data = dat, aes(x = x, y = y, color = `CV <= 15%`)) + 
+  geom_point(shape = 16, size = 8) +
+  xlab("Replicate") +
+  ylab("Days after seeding") +
+  facet_wrap(~ Condition) +
+  theme_prism(base_size = 22, base_line_size = 1.2) +
+  theme(axis.line = element_blank(), axis.ticks = element_blank(), panel.spacing.x = unit(1.5, "lines"), legend.title = element_text(), legend.title.position = "top")
+```
+
+### Check effect medium change
+
+```{r, fig.height=8, fig.width=12}
+
+dat <- long[long$`Time (min)` <= 20 & long$Date >= as.Date("2026-02-16") & long$Date < as.Date("2026-02-20") & long$Replicate <= 4 & long$Condition != "Calibration resistor" & long$Condition != "ALI hydrated" & long$Condition != "ALI dry" & long$Condition != "Artificial tears" & long$Condition != "Measurement medium",]
+
+dat$`Days after seeding` <- factor(dat$`Days after seeding`, levels = c(12, 14))
+dat$`Days after seeding` <- factor(paste0("Day ", as.character(dat$`Days after seeding`)), levels = c("Day 12","Day 14"))
+
+ggplot(data = dat, aes(x = factor(`Time (min)`), y = `Resistance (Ω)`, color = Condition, group = interaction(Condition, Measurement))) + 
+    xlab("Measurement") +
+    scale_x_discrete(label = c("Before", "After")) +
+    geom_violin(width = 0.5, scale = "width", position = position_dodge(width = 0.8), alpha = 0.2, colour = "black", linewidth = 1) +
+    geom_sina(size = 4, maxwidth = 0.5, position = position_dodge(width = 0.8), scale = FALSE, alpha = 0.4, stroke = 0) +
+    facet_wrap(~ `Days after seeding`) +
+    theme_prism(base_size = 28) +
+    theme(axis.title.x = element_blank())
+
+```
+
+### Check stability across minutes
+
+```{r, fig.height=12, fig.width=12}
+#dat <- long[long$`Time (min)` <= 80 & long$PBS == "Before PBS",]
+dat <- long[long$`Time (min)` >= 20 & long$`Time (min)` <= 80 & long$Date >= as.Date("2026-02-16") & long$Date < as.Date("2026-02-20") & long$Condition != "Calibration resistor" & long$Condition != "Artificial tears",]
+
+dat$`Days after seeding` <- factor(dat$`Days after seeding`, levels = c(12, 14))
+dat$`Days after seeding` <- factor(paste0("Day ", as.character(dat$`Days after seeding`)), levels = c("Day 12","Day 14"))
+
+lapply(split(dat, dat$`Days after seeding`), function(z) {
+  control_conditions <- c("Calibration resistor", "Measurement medium", "Artificial tears")
+  interesting_conditions <- setdiff(unique(z$Condition), control_conditions)
+  dat_background <- z %>%
+    filter(Condition %in% interesting_conditions) %>%
+    mutate(Condition_facet = Condition) %>%
+    crossing(Condition_display = interesting_conditions) %>%
+    filter(Condition_facet != Condition_display)
+  dat_interesting <- z %>%
+    filter(Condition %in% interesting_conditions) %>%
+    mutate(Condition_display = Condition)
+  dat_control <- z %>%
+    filter(Condition %in% control_conditions) %>%
+    crossing(Condition_display = interesting_conditions)
+
+  ggplot(data = z, aes(x = `Time (min)`, y = `Resistance (Ω)`)) + 
+    geom_line(data = dat_background,
+              aes(group = interaction(Condition_facet, Replicate)),
+              color = "grey") +
+    geom_point(data = dat_background,
+              aes(group = interaction(Condition_facet, Replicate)),
+              color = "grey") +
+    geom_line(data = dat_interesting,
+              aes(color = Condition, 
+                  group = interaction(Condition, Replicate))
+              ) +
+    geom_point(data = dat_interesting,
+              aes(color = Condition, 
+                  group = interaction(Condition, Replicate))
+              ) +
+    geom_line(data = dat_control,
+              aes(color = Condition, 
+                  group = interaction(Condition, Replicate))
+              ) +
+    geom_point(data = dat_control,
+              aes(color = Condition, 
+                  group = interaction(Condition, Replicate))
+              ) +
+    geom_hline(yintercept = 1000, linetype="dashed") +
+    facet_wrap(~ factor(Condition_display, levels = c("HCE-T", "Hydrogel control", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry", "Shear stress"))) +
+    theme_prism() +
+    theme(aspect.ratio = 0.713) +
+    labs(title = z$`Days after seeding`)
+})
+
+# Can do linear fit and show this in color while only showing the condition-specific points
+
+```
+
+### Visualise controls
+
+```{r}
+
+#dat <- long[long$`Time (min)` == 20 & long$PBS == "Before PBS" & long$Condition == "Control" & long$Replicate != 2,]
+dat <- long[long$`Time (min)` == 20 & long$Condition == "Control",]
+x <- rep("Experiment 2", length(dat$`Resistance (Ω)`))
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(200, 400), expand = c(0, 0)) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+```
+
+## Metrics: nTEER
+
+Control and incubation in PBS only at day 16 after cell seeding
+
+```{r}
+
+control <- mean(long[long$Date == as.Date("2026-02-20"),]$`Resistance (Ω)`[long[long$Date == as.Date("2026-02-20"),]$Condition == "Control"])
+hydrogelcontrol <- mean(long[long$Date == as.Date("2026-02-20"),]$`Resistance (Ω)`[long[long$Date == as.Date("2026-02-20"),]$Condition == "Hydrogel control"])
+
+nTEER <- long[long$Date == as.Date("2026-02-20"),] %>%
+  filter(!is.na(Plate)) %>%
+  group_by(Date, `Days after seeding`, Condition, Replicate) %>%
+  reframe(
+    `TEER (Ω*cm²)` = case_when(
+      str_detect(first(Condition), "Hydrogel HCE-T") ~ (`Resistance (Ω)`[`Time (min)` == 20] - hydrogelcontrol) * 0.3359273609,
+      TRUE ~ (`Resistance (Ω)`[`Time (min)` == 20] - control) * 0.3359273609
+    ),
+    `nTEER (Ω*cm²)` = (`Resistance (Ω)`[`Time (min)` == 20] - `Resistance (Ω)`[`Time (min)` == 40]) * 0.3359273609
+  )
+```
+
+## Statistics TEER
+
+```{r}
+
+dat <- nTEER[nTEER$Condition != "Control" & nTEER$Condition != "Hydrogel control",]
+renamed_dat <- dat %>%
+  rename(TEER = `TEER (Ω*cm²)`)
+
+model <- lm(`TEER (Ω*cm²)` ~ Condition, data = dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`TEER (Ω*cm²)`",
+         facet.by = "Condition",
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+renamed_dat %>%
+  group_by(Condition) %>%
+  shapiro_test(TEER)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`TEER (Ω*cm²)` ~ Condition)
+dat_summary <- dat %>%
+  group_by(Condition) %>%
+  get_summary_stats(`TEER (Ω*cm²)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 2, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_TEER <- emmeans(model, ~ Condition, vcov. = vcovHC3)
+pairs(emm_TEER, adjust = "bonferroni")
+stat_TEER <- summary(pairs(emm_TEER, adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_TEER_pos <- stat_TEER %>%
+  add_xy_position(
+    x = "Condition",
+    data = dat,
+    formula = `TEER (Ω*cm²)` ~ Condition,
+  ) %>%
+  mutate(
+    xmin = match(group1, levels(droplevels(dat$Condition))),
+    xmax = match(group2, levels(droplevels(dat$Condition))),
+  )
+
+```
+
+## Statistics nTEER
+
+HCE-T as an outlier that needs taken care of
+
+```{r}
+
+dat <- nTEER[nTEER$Condition != "Control" & nTEER$Condition != "Hydrogel control" & !(nTEER$Condition == "HCE-T" & nTEER$Replicate == 8 ),]
+renamed_dat <- dat %>%
+  rename(nTEER = `nTEER (Ω*cm²)`)
+
+model <- lm(`nTEER (Ω*cm²)` ~ Condition, data = dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`nTEER (Ω*cm²)`",
+         facet.by = "Condition",
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+renamed_dat %>%
+  group_by(Condition) %>%
+  shapiro_test(nTEER)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`nTEER (Ω*cm²)` ~ Condition)
+dat_summary <- dat %>%
+  group_by(Condition) %>%
+  get_summary_stats(`nTEER (Ω*cm²)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 2, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_nTEER <- emmeans(model, ~ Condition, vcov. = vcovHC3)
+pairs(emm_nTEER, adjust = "bonferroni")
+stat_nTEER <- summary(pairs(emm_nTEER, adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_nTEER_pos <- stat_nTEER %>%
+  add_xy_position(
+    x = "Condition",
+    data = dat,
+    formula = `nTEER (Ω*cm²)` ~ Condition,
+  ) %>%
+  mutate(y.position = 375 + (row_number() * 25)) %>%
+  mutate(
+    xmin = match(group1, levels(droplevels(dat$Condition))),
+    xmax = match(group2, levels(droplevels(dat$Condition))),
+  )
+
+```
+
+## Visualise (n)TEER
+
+```{r, fig.width=12, fig.height=12}
+
+dat <- long[long$`Time (min)` == 20 & long$Date == as.Date("2026-02-20") & long$Condition != "Calibration resistor" & long$Condition != "Measurement medium" & long$Condition != "Artificial tears",]
+#dat <- long[long$`Time (min)` == 20 & long$Date == as.Date("2026-02-20") & str_detect(long$Condition, regex("Control|Hydrogel|HCE-T", ignore_case = TRUE)),]
+x <- dat$Condition
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 1) +
+  geom_sina(size = 2, maxwidth = 1) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(0, 2000), expand = c(0, 0)) +
+  theme_prism() +
+  theme(aspect.ratio = 0.713, axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+
+dat <- nTEER[nTEER$Condition != "Control" & nTEER$Condition != "Hydrogel control",]
+x <- dat$Condition
+y <- dat$`TEER (Ω*cm²)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 6, maxwidth = 0.5, scale = FALSE, alpha =
+    0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 2, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(0, 1000), expand = c(0, 0), oob = oob_keep, guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  stat_pvalue_manual(
+    stat_TEER_pos,
+    label = "p.adj.signif",
+    tip.length = 0,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  scale_color_manual(
+    breaks = c("HCE-T", "Hydrogel control", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry", "Shear stress", "Control", "Calibration resistor", "Measurement medium", "Artificial tears"),
+    values = c("HCE-T" = "#F8766D", "Hydrogel control" = "#DB8E00", "Hydrogel HCE-T" = "#AEA200", "Tears" = "#64B200", "ALI hydrated" = "#00BD5C", "ALI dry" = "#00C1A7", "Shear stress" = "#00BADE", "Control" = "#00A6FF", "Calibration resistor" = "#B385FF", "Measurement medium" = "#EF67EB", "Artificial tears" = "#FF63B6")) +
+  theme_prism(base_size = 28) +
+  theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"), axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+
+dat <- nTEER[nTEER$Condition != "Control" & nTEER$Condition != "Hydrogel control" & !(nTEER$Condition == "HCE-T" & nTEER$Replicate == 8 ),]
+x <- dat$Condition
+y <- dat$`nTEER (Ω*cm²)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 6, maxwidth = 0.5, scale = FALSE, alpha =
+    0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(0, 800), expand = c(0, 0), oob = oob_keep, guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  stat_pvalue_manual(
+    stat_nTEER_pos,
+    label = "p.adj.signif",
+    tip.length = 0,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  scale_color_manual(
+    breaks = c("HCE-T", "Hydrogel control", "Hydrogel HCE-T", "Tears", "ALI hydrated", "ALI dry", "Shear stress", "Control", "Calibration resistor", "Measurement medium", "Artificial tears"),
+    values = c("HCE-T" = "#F8766D", "Hydrogel control" = "#DB8E00", "Hydrogel HCE-T" = "#AEA200", "Tears" = "#64B200", "ALI hydrated" = "#00BD5C", "ALI dry" = "#00C1A7", "Shear stress" = "#00BADE", "Control" = "#00A6FF", "Calibration resistor" = "#B385FF", "Measurement medium" = "#EF67EB", "Artificial tears" = "#FF63B6")) +
+  theme_prism(base_size = 28) +
+  theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"), axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+
+```
+
+# Meta
+
+## Measurement medium
+
+### Data
+
+Filtering datapoints after incubation in PBS on Day 16, otherwise all timepoints are kept because non-biological samples do not change over time
+
+```{r}
+
+experiment4_medium <- long[!(long$`Days after seeding` == 16 & long$`Time (min)` == 40) & long$Condition == "Measurement medium",]
+
+mean(long[long$Condition == "Artificial tears",]$`Resistance (Ω)`) - mean(experiment4_medium$`Resistance (Ω)`)
+
+```
+
+### Visualisation
+
+```{r}
+dat <- experiment4_medium
+x <- rep("Experiment 1", length(dat$`Resistance (Ω)`))
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+```
+
+### Statistics: resistance
+
+-   Categorical variables: Experiment
+-   Continuous variables: Resistance
+
+qqplot - Experiment 2 has a worse CI
+
+shapiro - Only Experiment 2 is considered normally distributed, but qq plots overrule this test
+
+levene - Homogeneity of variances, the biggest difference is a factor of 2
+
+anova: type 2, hc3 to correct for heteroscedasticity, bonferroni pairwise contrasts - No Significant effect of Experiment - All pairwise contrasts non-significant
+
+```{r}
+medium_resistance <- data.frame(
+  "Experiment" = c(rep("Experiment 1", nrow(experiment1_medium)), rep("Experiment 2", nrow(experiment2_medium)), rep("Experiment 3", nrow(experiment3_medium)), rep("Experiment 4", nrow(experiment4_medium))),
+  "Resistance (Ω)" = c(experiment1_medium$`Resistance (Ω)`, experiment2_medium$`Resistance (Ω)`, experiment3_medium$`Resistance (Ω)`, experiment4_medium$`Resistance (Ω)`),
+  check.names = FALSE
+)
+dat <- medium_resistance
+dat$Experiment <- as.factor(dat$Experiment)
+renamed_dat <- dat %>%
+  rename(Resistance = `Resistance (Ω)`)
+
+model <- lm(`Resistance (Ω)` ~ Experiment, data = dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`Resistance (Ω)`",
+         facet.by = "Experiment",
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+renamed_dat %>%
+  group_by(Experiment) %>%
+  shapiro_test(Resistance)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`Resistance (Ω)` ~ Experiment)
+dat_summary <- dat %>%
+  group_by(Experiment) %>%
+  get_summary_stats(`Resistance (Ω)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 2, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_Resistance <- emmeans(model, ~ Experiment, vcov. = vcovHC3)
+pairs(emm_Resistance, adjust = "bonferroni")
+stat_Resistance <- summary(pairs(emm_Resistance, adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_Resistance_pos <- stat_Resistance %>%
+  add_xy_position(
+    x = "Experiment",
+    data = dat,
+    formula = `Resistance (Ω)` ~ Experiment,
+  ) %>%
+  mutate(y.position = 50 + (row_number() * 3)) %>%
+  mutate(
+    xmin = match(group1, levels(droplevels(dat$Experiment))),
+    xmax = match(group2, levels(droplevels(dat$Experiment))),
+  )
+
+
+
+```
+
+### Visualisation
+
+```{r}
+dat <- medium_resistance
+x <- dat$Experiment
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Experiment)) + 
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 6, maxwidth = 0.5, scale = FALSE, alpha =
+    0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(30, 70), expand = c(0, 0), oob = oob_keep, guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  stat_pvalue_manual(
+    stat_Resistance_pos,
+    label = "p.adj.signif",
+    tip.length = 0,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  scale_color_manual(
+    breaks = c("Experiment 1", "Experiment 2", "Experiment 3", "Experiment 4"),
+    values = c("Experiment 1" = "#F8766D", "Experiment 2" = "#DB8E00", "Experiment 3" = "#AEA200", "Experiment 4" = "#64B200")) +
+  theme_prism(base_size = 28) +
+  theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"), axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+```
+
+## Controls
+
+### Data
+
+Filtering datapoints after incubation in PBS on Day 16, otherwise all timepoints are kept because non-biological samples do not change over time
+
+```{r}
+
+experiment4_control <- long[!(long$`Days after seeding` == 16 & long$`Time (min)` == 40) & long$Condition == "Control",]
+
+```
+
+### Visualisation
+
+```{r}
+dat <- experiment4_control
+x <- rep("Experiment 1", length(dat$`Resistance (Ω)`))
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(200, 400), expand = c(0, 0)) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+
+```
+
+### Statistics: resistance
+
+-   Categorical variables: Experiment
+-   Continuous variables: Resistance
+
+qqplot - No comments
+
+shapiro - Only Experiment 4 is considered normally distributed, but qq plots overrule this test
+
+levene - Homogeneity of variances, the biggest difference is a factor of 1
+
+anova: type 2, hc3 to correct for heteroscedasticity, bonferroni pairwise contrasts - Significant effect of Experiment - All pairwise contrasts are significant
+
+```{r}
+control_resistance <- data.frame(
+  "Experiment" = c(rep("Experiment 1", nrow(experiment1_control)), rep("Experiment 3", nrow(experiment3_control)), rep("Experiment 4", nrow(experiment4_control))),
+  "Resistance (Ω)" = c(experiment1_control$`Resistance (Ω)`, experiment3_control$`Resistance (Ω)`, experiment4_control$`Resistance (Ω)`),
+  check.names = FALSE
+)
+dat <- control_resistance
+dat$Experiment <- as.factor(dat$Experiment)
+renamed_dat <- dat %>%
+  rename(Resistance = `Resistance (Ω)`)
+
+model <- lm(`Resistance (Ω)` ~ Experiment, data = dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`Resistance (Ω)`",
+         facet.by = "Experiment",
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+renamed_dat %>%
+  group_by(Experiment) %>%
+  shapiro_test(Resistance)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`Resistance (Ω)` ~ Experiment)
+dat_summary <- dat %>%
+  group_by(Experiment) %>%
+  get_summary_stats(`Resistance (Ω)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 2, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_Resistance <- emmeans(model, ~ Experiment, vcov. = vcovHC3)
+pairs(emm_Resistance, adjust = "bonferroni")
+stat_Resistance <- summary(pairs(emm_Resistance, adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_Resistance_pos <- stat_Resistance %>%
+  add_xy_position(
+    x = "Experiment",
+    data = dat,
+    formula = `Resistance (Ω)` ~ Experiment,
+  ) %>%
+  mutate(y.position = 300 + (row_number() * 20)) %>%
+  mutate(
+    xmin = match(group1, levels(droplevels(dat$Experiment))),
+    xmax = match(group2, levels(droplevels(dat$Experiment))),
+  )
+
+
+
+```
+
+### Visualisation
+
+```{r}
+dat <- control_resistance
+x <- dat$Experiment
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Experiment)) + 
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 6, maxwidth = 0.5, scale = FALSE, alpha =
+    0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(200, 400), expand = c(0, 0), oob = oob_keep, guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  stat_pvalue_manual(
+    stat_Resistance_pos,
+    label = "p.adj.signif",
+    tip.length = 0,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  scale_color_manual(
+    breaks = c("Experiment 1", "Experiment 2", "Experiment 3", "Experiment 4"),
+    values = c("Experiment 1" = "#F8766D", "Experiment 2" = "#DB8E00", "Experiment 3" = "#AEA200", "Experiment 4" = "#64B200")) +
+  theme_prism(base_size = 28) +
+  theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"), axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+
+```
+
+## HCE-T
+
+### Data
+
+Limiting data points to the 20 minute mark for consistency Limiting non-HCE-T data points to 9 days after seeding to avoid any influence of the induced conditions Limiting data points to 16 days after seeding to avoid any influence of the diffusion assay on day 16
+
+```{r}
+
+experiment4_hcet_resistance <- long[long$Group == "Cells" & long$Condition != "Hydrogel HCE-T" & long$`Days after seeding` <= 9 | long$Condition == "HCE-T" & long$`Time (min)` == 20  & long$`Days after seeding` <= 16,]
+experiment4_hcet_nTEER <- nTEER[nTEER$Condition == "HCE-T",]
+
+```
+
+### Visualisation
+
+```{r}
+dat <- experiment4_hcet_resistance
+x <- rep("Experiment 1", length(dat$`Resistance (Ω)`))
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = x, y = y)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+
+dat <- experiment4_hcet_nTEER
+x <- rep("Experiment 1", length(dat$`TEER (Ω*cm²)`))
+y <- dat$`TEER (Ω*cm²)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+
+dat <- experiment4_hcet_nTEER
+x <- rep("Experiment 1", length(dat$`nTEER (Ω*cm²)`))
+y <- dat$`nTEER (Ω*cm²)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Condition)) + 
+  geom_violin(width = 0.5) +
+  geom_sina(size = 2, maxwidth = 0.5) +
+  labs(colour = "Apical volume (µL)") +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  theme_prism() +
+  theme(aspect.ratio = 1.4, axis.title.x = element_blank())
+
+```
+
+### Stat: Resistance
+
+-   Categorical variables: Experiment
+-   Continuous variables: Resistance
+
+qqplot - Day 1 from experiment 1 causes a slight deviation from linearity - Day 2 from experiment 4 causes a slight deviation from linearity
+
+shapiro - Only Experiment 2 is considered normally distributed, but qq plots overrule this test
+
+levene - Heterogeneity of variances, the biggest difference is a factor of 5
+
+anova: type 2, hc3 to correct for heteroscedasticity, bonferroni pairwise contrasts - Significant effect of Experiment - All pairwise contrasts significant except between experiment 1 and experiment 3
+
+```{r}
+
+## removing first timepoint makes everything significant
+#experiment1_hcet_resistance <- experiment1_hcet_resistance[experiment1_hcet_resistance$`Days after seeding` >= 3,]
+#experiment2_hcet_resistance <- experiment2_hcet_resistance[experiment2_hcet_resistance$`Days after seeding` >= 3,]
+#experiment3_hcet_resistance <- experiment3_hcet_resistance[experiment3_hcet_resistance$`Days after seeding` >= 3,]
+#experiment4_hcet_resistance <- experiment4_hcet_resistance[experiment4_hcet_resistance$`Days after seeding` >= 3,]
+
+hcet_resistance <- data.frame(
+  "Experiment" = c(rep("Experiment 1", nrow(experiment1_hcet_resistance)), rep("Experiment 2", nrow(experiment2_hcet_resistance)), rep("Experiment 3", nrow(experiment3_hcet_resistance)), rep("Experiment 4", nrow(experiment4_hcet_resistance))),
+  "Resistance (Ω)" = c(experiment1_hcet_resistance$`Resistance (Ω)`, experiment2_hcet_resistance$`Resistance (Ω)`, experiment3_hcet_resistance$`Resistance (Ω)`, experiment4_hcet_resistance$`Resistance (Ω)`),
+  check.names = FALSE
+)
+dat <- hcet_resistance
+dat$Experiment <- as.factor(dat$Experiment)
+renamed_dat <- dat %>%
+  rename(Resistance = `Resistance (Ω)`)
+
+model <- lm(`Resistance (Ω)` ~ Experiment, data = dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`Resistance (Ω)`",
+         facet.by = "Experiment",
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+renamed_dat %>%
+  group_by(Experiment) %>%
+  shapiro_test(Resistance)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`Resistance (Ω)` ~ Experiment)
+dat_summary <- dat %>%
+  group_by(Experiment) %>%
+  get_summary_stats(`Resistance (Ω)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 2, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_Resistance <- emmeans(model, ~ Experiment, vcov. = vcovHC3)
+pairs(emm_Resistance, adjust = "bonferroni")
+stat_Resistance <- summary(pairs(emm_Resistance, adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_Resistance_pos <- stat_Resistance %>%
+  add_xy_position(
+    x = "Experiment",
+    data = dat,
+    formula = `Resistance (Ω)` ~ Experiment,
+  ) %>%
+  mutate(y.position = 1500 + (row_number() * 90)) %>%
+  mutate(
+    xmin = match(group1, levels(droplevels(dat$Experiment))),
+    xmax = match(group2, levels(droplevels(dat$Experiment))),
+  )
+
+```
+
+### Vis: Resistance
+
+```{r}
+
+dat <- hcet_resistance
+x <- dat$Experiment
+y <- dat$`Resistance (Ω)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Experiment)) + 
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 6, maxwidth = 0.5, scale = FALSE, alpha =
+    0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(0, 2000), expand = c(0, 0), oob = oob_keep, guide = guide_prism_minor()) +
+  coord_cartesian(clip = "off") +
+  stat_pvalue_manual(
+    stat_Resistance_pos,
+    label = "p.adj.signif",
+    tip.length = 0,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  scale_color_manual(
+    breaks = c("Experiment 1", "Experiment 2", "Experiment 3", "Experiment 4"),
+    values = c("Experiment 1" = "#F8766D", "Experiment 2" = "#DB8E00", "Experiment 3" = "#AEA200", "Experiment 4" = "#64B200")) +
+  theme_prism(base_size = 28) +
+  theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"), axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+
+```
+
+### Stat: TEER
+
+-   Categorical variables: Experiment
+-   Continuous variables: TEER
+
+qqplot - Day 1 from experiment 1 causes a slight deviation from linearity
+
+shapiro - Only Experiment 1 is considered non-normally distributed, but qq plots overrule this test
+
+levene - Heterogeneity of variances, the biggest difference is a factor of 5
+
+anova: type 2, hc3 to correct for heteroscedasticity, bonferroni pairwise contrasts - Significant effect of Experiment - All pairwise contrasts significant except between experiment 1 and experiment 4
+
+```{r}
+
+hcet_TEER <- data.frame(
+  "Experiment" = c(rep("Experiment 1", nrow(experiment1_hcet_TEER)), rep("Experiment 2", nrow(experiment2_hcet_nTEER)), rep("Experiment 3", nrow(experiment3_hcet_nTEER)), rep("Experiment 4", nrow(experiment4_hcet_nTEER))),
+  "TEER (Ω*cm²)" = c(experiment1_hcet_TEER$`TEER (Ω*cm²)`, experiment2_hcet_nTEER$`TEER (Ω*cm²)`, experiment3_hcet_nTEER$`TEER (Ω*cm²)`, experiment4_hcet_nTEER$`TEER (Ω*cm²)`),
+  check.names = FALSE
+)
+dat <- hcet_TEER
+dat$Experiment <- as.factor(dat$Experiment)
+renamed_dat <- dat %>%
+  rename(TEER = `TEER (Ω*cm²)`)
+
+model <- lm(`TEER (Ω*cm²)` ~ Experiment, data = dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`TEER (Ω*cm²)`",
+         facet.by = "Experiment",
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+renamed_dat %>%
+  group_by(Experiment) %>%
+  shapiro_test(TEER)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`TEER (Ω*cm²)` ~ Experiment)
+dat_summary <- dat %>%
+  group_by(Experiment) %>%
+  get_summary_stats(`TEER (Ω*cm²)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 2, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_TEER <- emmeans(model, ~ Experiment, vcov. = vcovHC3)
+pairs(emm_TEER, adjust = "bonferroni")
+stat_TEER <- summary(pairs(emm_TEER, adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_TEER_pos <- stat_TEER %>%
+  add_xy_position(
+    x = "Experiment",
+    data = dat,
+    formula = `TEER (Ω*cm²)` ~ Experiment,
+  ) %>%
+  mutate(y.position = 220 + (row_number() * 20)) %>%
+  mutate(
+    xmin = match(group1, levels(droplevels(dat$Experiment))),
+    xmax = match(group2, levels(droplevels(dat$Experiment))),
+  )
+
+```
+
+### Vis: TEER
+
+TEER of Experiment 2 is estimated using the mean control across all experiments
+
+```{r}
+
+dat <- hcet_TEER
+x <- dat$Experiment
+y <- dat$`TEER (Ω*cm²)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Experiment)) + 
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 6, maxwidth = 0.5, scale = FALSE, alpha =
+    0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(-50, 400), expand = c(0, 0), oob = oob_keep, guide = guide_prism_minor()) +
+  geom_hline(yintercept = 0, linetype="dashed") +
+  coord_cartesian(clip = "off") +
+  stat_pvalue_manual(
+    stat_TEER_pos,
+    label = "p.adj.signif",
+    tip.length = 0,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  scale_color_manual(
+    breaks = c("Experiment 1", "Experiment 2", "Experiment 3", "Experiment 4"),
+    values = c("Experiment 1" = "#F8766D", "Experiment 2" = "#DB8E00", "Experiment 3" = "#AEA200", "Experiment 4" = "#64B200")) +
+  theme_prism(base_size = 28) +
+  theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"), axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+
+```
+
+### Stat: nTEER
+
+-   Categorical variables: Experiment
+-   Continuous variables: nTEER
+
+qqplot - No comments
+
+shapiro - Only Experiment 3 is considered normally distributed, but qq plots overrule this test
+
+levene - Heterogeneity of variances, the biggest difference is a factor of 2
+
+anova: type 2, hc3 to correct for heteroscedasticity, bonferroni pairwise contrasts - Significant effect of Experiment - All pairwise contrasts significant except between experiment 2 and experiment 4
+
+```{r}
+hcet_nTEER <- data.frame(
+  "Experiment" = c(rep("Experiment 1", nrow(experiment1_hcet_nTEER)), rep("Experiment 2", nrow(experiment2_hcet_nTEER)), rep("Experiment 3", nrow(experiment3_hcet_nTEER)), rep("Experiment 4", nrow(experiment4_hcet_nTEER))),
+  "nTEER (Ω*cm²)" = c(experiment1_hcet_nTEER$`nTEER (Ω*cm²)`, experiment2_hcet_nTEER$`nTEER (Ω*cm²)`, experiment3_hcet_nTEER$`nTEER (Ω*cm²)`, experiment4_hcet_nTEER$`nTEER (Ω*cm²)`),
+  check.names = FALSE
+)
+dat <- hcet_nTEER
+dat$Experiment <- as.factor(dat$Experiment)
+renamed_dat <- dat %>%
+  rename(nTEER = `nTEER (Ω*cm²)`)
+
+model <- lm(`nTEER (Ω*cm²)` ~ Experiment, data = dat)
+
+## Normality
+ggqqplot(data = residuals(model), 
+         ggtheme = theme_prism()
+         )
+ggqqplot(data = dat,
+         x = "`nTEER (Ω*cm²)`",
+         facet.by = "Experiment",
+         ggtheme = theme_prism()
+         )
+
+shapiro_test(residuals(model))
+renamed_dat %>%
+  group_by(Experiment) %>%
+  shapiro_test(nTEER)
+
+## Homogeneity of variances
+plot(model, 1)
+dat %>% 
+  levene_test(`nTEER (Ω*cm²)` ~ Experiment)
+dat_summary <- dat %>%
+  group_by(Experiment) %>%
+  get_summary_stats(`nTEER (Ω*cm²)`, type = "mean_sd")
+max(dat_summary$sd)/min(dat_summary$sd)
+
+## ANOVA
+anova_results <- Anova(model, type = 2, white.adjust = "hc3")
+print(anova_results)
+
+## Pairwise
+emm_options(parens = "a^")
+vcovHC3 <- vcovHC(model, type = "HC3")
+emm_nTEER <- emmeans(model, ~ Experiment, vcov. = vcovHC3)
+pairs(emm_nTEER, adjust = "bonferroni")
+stat_nTEER <- summary(pairs(emm_nTEER, adjust = "bonferroni")) %>%
+  separate(contrast, into = c("group1", "group2"),
+           sep = " - ") %>%
+  rename(p.adj = p.value) %>%
+  add_significance("p.adj")
+stat_nTEER_pos <- stat_nTEER %>%
+  add_xy_position(
+    x = "Experiment",
+    data = dat,
+    formula = `nTEER (Ω*cm²)` ~ Experiment,
+  ) %>%
+  mutate(y.position = 220 + (row_number() * 20)) %>%
+  mutate(
+    xmin = match(group1, levels(droplevels(dat$Experiment))),
+    xmax = match(group2, levels(droplevels(dat$Experiment))),
+  )
+
+```
+
+### Vis: nTEER
+
+```{r}
+
+dat <- hcet_nTEER
+x <- dat$Experiment
+y <- dat$`nTEER (Ω*cm²)`
+
+ggplot(data = dat, aes(x = x, y = y, color = Experiment)) + 
+  geom_violin(width = 0.5, scale = "width", alpha = 0.2, colour = "black", linewidth = 1) +
+  geom_sina(size = 6, maxwidth = 0.5, scale = FALSE, alpha =
+    0.4, stroke = 0) +
+  stat_summary(geom = "point", fun = "mean", size = 0.5, shape = 3, colour = "black", stroke = 1.5) +
+  stat_summary(geom = "errorbar", fun.data = "mean_sdl", fun.args = list(mult = 1), width = 0.2, colour = "black", linewidth = 1) +
+  ylab(names(which(sapply(dat, identical, y = y)))) +
+  scale_y_continuous(limits = c(-50, 400), expand = c(0, 0), oob = oob_keep, guide = guide_prism_minor()) +
+  geom_hline(yintercept = 0, linetype="dashed") +
+  coord_cartesian(clip = "off") +
+  stat_pvalue_manual(
+    stat_nTEER_pos,
+    label = "p.adj.signif",
+    tip.length = 0,
+    size = 7.76,
+    linewidth = 1,
+  ) +
+  scale_color_manual(
+    breaks = c("Experiment 1", "Experiment 2", "Experiment 3", "Experiment 4"),
+    values = c("Experiment 1" = "#F8766D", "Experiment 2" = "#DB8E00", "Experiment 3" = "#AEA200", "Experiment 4" = "#64B200")) +
+  theme_prism(base_size = 28) +
+  theme(plot.margin = margin(t = 50, b = 20, unit = "pt"), legend.key.spacing.y = unit(0.5, "lines"), axis.ticks.x = element_blank(), axis.text.x = element_blank(), axis.title.x = element_blank())
+
+```
