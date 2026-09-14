@@ -1,0 +1,67 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Script Version="1.0">
+  <Language>Python</Language>
+  <Text>#######################################################
+## I M A G E P R O C E S S I N G
+##
+## Macro name: JVM_SplitPlate-Auto
+## Required files: image
+## Required hardware: microscope with motorized stage
+##
+##
+## Copyright (c) 2019 by Carl Zeiss Microscopy GmbH.
+## Permission is granted to use, modify and distribute this code,
+## as long as this copyright notice remains part of the code.
+#######################################################
+##
+##
+from System.IO import File, Directory, FileInfo, Path
+## Loop over all open images
+for i in range(Zen.Application.Documents.Count):
+	image = Zen.Application.Documents[0]
+	## Get image info
+	imageFullName = image.Metadata.GetMetadataStringWithPath("FileName")
+	imagePathArray = imageFullName.split("\\")
+	imagePath = "\\".join(imagePathArray[:-1])
+	imageName = imagePathArray[-1].split(".")[0]
+	## Split image into scenes
+	imageArray = Zen.Processing.Utilities.SplitScenesToArray(image)
+	## Close image (otherwise it cannot be deleted in explorer)
+	image.Close()
+	## Loop over array of scenes
+	for image in imageArray:
+		## Get scene info
+		well = image.Metadata.GetMetadataStringWithPath("Metadata/Information/Image/Dimensions/S/Scenes[current]/Name")
+		wellName = imageName + "-" + well
+		## Create scene directory
+		wellPath = imagePath + "\\" + imageName + "\\" + well
+		if Directory.Exists(wellPath) == False:
+			Directory.CreateDirectory(wellPath)
+		## Create tile directory and save tiles
+		tilePath = wellPath + "\\" + "Tiles"
+		if Directory.Exists(tilePath) == False:
+			Directory.CreateDirectory(tilePath)
+		expset = Zen.Processing.Utilities.Settings.SingleFileExportSetting(ZenExportFileType.TIFF)
+		expset.DestinationFolder = tilePath
+		expset.SubsetString = "UseSubsetString"
+		expset.OriginalData = True
+		expset.ApplyDisplayCurveAndChannelColor = False
+		expset.BurnInGraphics = False
+		expset.Tiles = Zeiss.Micro.Scripting.Enumerations.ZenTileMode(0)
+		expset.GenerateXMLFile = True
+		expset.CreateFolder = False
+		expset.Prefix = wellName
+		expset.Compression = ZenTiffCompression.Lzw #Lzw #None, Lzw, Zip, Jpeg
+		expset.ConvertTo8Bit = False #True #Gray8, Gray16, Gray32Float, Bgr24, Bgr48, Bgr96Float, Bgra32, Gray64ComplexFloat, Bgr192ComplexFloat
+		Zen.Processing.Utilities.ExportSingleFile(image, expset)
+		## Close image (otherwise it cannot be deleted in explorer)
+		image.Close()
+## 
+#######################################################
+</Text>
+  <Author>Joris Van Meenen</Author>
+  <Description>Automatically splits whole-well scans into tiles after acquisition and organises them by well name.</Description>
+  <Keywords></Keywords>
+  <Column>0</Column>
+  <Row>0</Row>
+</Script>
